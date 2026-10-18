@@ -5,12 +5,8 @@
 
 #include <signal.h>
 #include <stdio.h>
-#include <pthread.h>
-
-/* FreeBSD/PS5 thread naming. Weak so the payload still links if the SDK lacks
- * it. Without this the loader names our main thread "payload.elf", which
- * instance_control's thread scan would not recognize. */
-__attribute__((weak)) void pthread_set_name_np(pthread_t, const char *);
+#include <unistd.h>
+#include <sys/syscall.h>
 
 /* Resolves the symbol the control listener calls (instance_control.c:328)
  * when a replacement payload asks this instance to stand down. Also our
@@ -25,9 +21,9 @@ static void on_signal(int sig) {
 }
 
 int main(void) {
-  if (pthread_set_name_np) {
-    pthread_set_name_np(pthread_self(), "zsshd.elf");
-  }
+  /* Name our main thread so the task manager / kinfo scan shows "zsshd.elf"
+   * instead of the loader's default "payload.elf". -1 = calling thread. */
+  (void)syscall(SYS_thr_set_name, -1, "zsshd.elf");
 
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);

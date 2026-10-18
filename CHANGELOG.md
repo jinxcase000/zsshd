@@ -3,6 +3,13 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.0.2] - 2026-10-18
+### Fixed
+- Main-thread naming now uses `syscall(SYS_thr_set_name, -1, "zsshd.elf")`
+  (the same mechanism as zftpd). The 0.0.1 `pthread_set_name_np` path was an
+  unresolved weak symbol on the SDK, so the task manager still showed
+  `payload.elf`.
+
 ## [0.0.1] - 2026-10-18
 ### Added
 - Initial working PS5 SSH payload, forked from zftpd.
