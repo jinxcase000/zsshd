@@ -26,7 +26,7 @@
 #define ZSSHD_PORT 22
 #endif
 #ifndef ZSSHD_VERSION
-#define ZSSHD_VERSION "0.0.1"
+#define ZSSHD_VERSION "0.0.2"
 #endif
 #ifndef ZSSHD_DIR
 #define ZSSHD_DIR "/data/zsshd"
