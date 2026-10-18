@@ -1,0 +1,5 @@
+# compiled payload(s)
+*.elf
+
+# top-level CMake build tree (regenerated from external/ sources)
+/build/

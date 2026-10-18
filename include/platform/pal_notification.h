@@ -1,0 +1,52 @@
+/*
+MIT License
+
+Copyright (c) 2026 Seregon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+/**
+ * @file pal_notification.h
+ * @brief System notification abstraction
+ */
+
+#ifndef PAL_NOTIFICATION_H
+#define PAL_NOTIFICATION_H
+
+int pal_notification_init(void);
+void pal_notification_shutdown(void);
+
+/**
+ * @brief Send a system notification with the default icon.
+ *
+ * On PS4/PS5 this shows a console toast. On other platforms it logs via syslog.
+ */
+void pal_notification_send(const char *message);
+
+/**
+ * @brief Send a system notification with an optional icon name.
+ *
+ * @param message   Notification text (required). Truncated to 1023 bytes.
+ * @param icon_name PS notification texture suffix (e.g. "icon_system").
+ *                  If NULL or empty, uses "icon_system". Ignored on non-PS.
+ */
+void pal_notification_send_ex(const char *message, const char *icon_name);
+
+#endif /* PAL_NOTIFICATION_H */

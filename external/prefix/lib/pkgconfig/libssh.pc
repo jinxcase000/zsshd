@@ -1,0 +1,10 @@
+prefix=/home/jinx/Claude/Projects/zftpd/zsshd/external/prefix
+exec_prefix=${prefix}
+libdir=/home/jinx/Claude/Projects/zftpd/zsshd/external/prefix/lib
+includedir=/home/jinx/Claude/Projects/zftpd/zsshd/external/prefix/include
+
+Name: libssh
+Description: The SSH Library
+Version: 0.11.1
+Libs: -L${libdir} -lssh
+Cflags: -I${includedir}
