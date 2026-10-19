@@ -3,6 +3,16 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.0.3] - 2026-10-18
+### Added
+- Filesystem commands in the shell: `mkdir` (with `-p`), `rmdir`, `touch`,
+  `rm` (with `-r` / `-f`), `cp` (with `-r`), and `mv` (rename, with a
+  copy-then-delete fallback across filesystem boundaries).
+### Fixed
+- Worker threads now get a 1 MiB stack and `cp`'s copy buffer was reduced from
+  64 KiB to 8 KiB; the oversized on-stack buffer overflowed the small default
+  thread stack and segfaulted the whole payload on the first `cp`.
+
 ## [0.0.2] - 2026-10-18
 ### Fixed
 - Main-thread naming now uses `syscall(SYS_thr_set_name, -1, "zsshd.elf")`
