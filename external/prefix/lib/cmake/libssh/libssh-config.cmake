@@ -60,7 +60,7 @@ add_library(ssh STATIC IMPORTED)
 
 set_target_properties(ssh PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
-  INTERFACE_LINK_LIBRARIES "/home/jinx/Claude/Projects/zftpd/zsshd/external/prefix/lib/libmbedcrypto.a"
+  INTERFACE_LINK_LIBRARIES "\$<LINK_ONLY:MbedTLS::mbedcrypto>"
 )
 
 # Load information for each installed configuration.

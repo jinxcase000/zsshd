@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "zsshd_version.h"
 
 #if defined(PLATFORM_PS5)
 
@@ -1040,7 +1041,7 @@ void shell_run(ssh_channel channel) {
   ctx.hist_pos = 0;
 
   craw(&ctx, C_USER);
-  cputs(&ctx, "zsshd");
+  cputs(&ctx, "zsshd " ZSSHD_VERSION);
   craw(&ctx, C_RESET);
   cputs(&ctx, " ready. 'help' for commands, 'exit' to quit.\n");
   prompt(&ctx);

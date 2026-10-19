@@ -3,6 +3,18 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.1.0] - 2026-10-18
+### Changed
+- Upgraded the libssh dependency from 0.11.1 to 0.12.2 (built against the same
+  mbedTLS 3.6.x prefix).
+### Added
+- Post-quantum key exchange: the server now offers `sntrup761x25519-sha512` and
+  `mlkem768x25519-sha256` (provided by libssh 0.12 on the mbedTLS backend),
+  clearing the OpenSSH "not using a post-quantum key exchange" warning.
+### Fixed
+- Host-key generation migrated to the new `ssh_pki_generate_key` + `ssh_pki_ctx`
+  API; `ssh_pki_generate` was deprecated in libssh 0.12.
+
 ## [0.0.5] - 2026-10-18
 ### Added
 - Full in-line editing in the shell: Left/Right move the cursor, Home/End jump

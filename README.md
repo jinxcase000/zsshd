@@ -20,13 +20,13 @@ create either file on the console (presence disables passwordless `none`):
 
 ## Building
 Requires [`ps5-payload-sdk`](https://github.com/ps5-payload-dev/sdk) with
-`$PS5_PAYLOAD_SDK` set.
+`$PS5_PAYLOAD_SDK` set, and mbedTLS 3.6.x built into `external/prefix`.
 
 Dependencies (mbedtls, then libssh) are built once into `external/prefix`.
 libssh is configured against the already-installed mbedtls like so:
 
     set P $PWD/external/prefix
-    $PS5_PAYLOAD_SDK/bin/prospero-cmake -S external/libssh -B build/libssh \
+    $PS5_PAYLOAD_SDK/bin/prospero-cmake -S external/libssh-0.12.2 -B build/libssh-0.12 \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$P \
       -DBUILD_SHARED_LIBS=OFF -DWITH_MBEDTLS=ON \
       -DMBEDTLS_INCLUDE_DIR=$P/include \
@@ -37,7 +37,7 @@ libssh is configured against the already-installed mbedtls like so:
       -DWITH_NACL=OFF -DWITH_PCAP=OFF -DWITH_EXEC=OFF -DWITH_EXAMPLES=OFF \
       -DUNIT_TESTING=OFF -DWITH_SYMBOL_VERSIONING=OFF \
       -DWITH_DEBUG_CALLTRACE=OFF
-    cmake --build build/libssh -j(nproc); and cmake --install build/libssh
+    cmake --build build/libssh-0.12 -j(nproc); and cmake --install build/libssh-0.12
 
 Then build the payload:
 
