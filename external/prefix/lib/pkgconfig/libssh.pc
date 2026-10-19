@@ -5,6 +5,7 @@ includedir=/home/jinx/Claude/Projects/zftpd/zsshd/external/prefix/include
 
 Name: libssh
 Description: The SSH Library
-Version: 0.11.1
+Version: 0.12.2
 Libs: -L${libdir} -lssh
 Cflags: -I${includedir}
+Requires.private: 

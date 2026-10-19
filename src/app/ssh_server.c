@@ -8,6 +8,7 @@
 
 #include "shell.h"
 #include "pal_notification.h"
+#include "zsshd_version.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -24,9 +25,6 @@
 
 #ifndef ZSSHD_PORT
 #define ZSSHD_PORT 22
-#endif
-#ifndef ZSSHD_VERSION
-#define ZSSHD_VERSION "0.0.5"
 #endif
 #ifndef ZSSHD_DIR
 #define ZSSHD_DIR "/data/zsshd"
@@ -265,8 +263,18 @@ static int ensure_hostkey(void) {
     return 0;
   }
   ssh_key key = NULL;
-  /* RSA, not ed25519: the mbedtls crypto backend is unreliable for ed25519. */
-  if (ssh_pki_generate(SSH_KEYTYPE_RSA, 2048, &key) != SSH_OK) {
+  /* RSA, not ed25519: the mbedtls crypto backend is unreliable for ed25519.
+   * libssh 0.12 replaced ssh_pki_generate(type, bits, ...) with a PKI context
+   * that carries the RSA size. */
+  ssh_pki_ctx pki = ssh_pki_ctx_new();
+  if (pki == NULL) {
+    return -1;
+  }
+  int bits = 2048;
+  (void)ssh_pki_ctx_options_set(pki, SSH_PKI_OPTION_RSA_KEY_SIZE, &bits);
+  int grc = ssh_pki_generate_key(SSH_KEYTYPE_RSA, pki, &key);
+  ssh_pki_ctx_free(pki);
+  if (grc != SSH_OK) {
     return -1;
   }
   int rc = ssh_pki_export_privkey_file(key, NULL, NULL, NULL, ZSSHD_HOSTKEY);
