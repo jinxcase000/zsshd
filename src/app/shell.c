@@ -3,6 +3,8 @@
 #if defined(PLATFORM_PS5)
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -382,6 +384,372 @@ static int cmd_exit(int argc, char **argv, struct shell_ctx *ctx) {
   return 0;
 }
 
+/* --- filesystem helpers (stage 2b) ------------------------------------ */
+
+static const char *base_name(const char *p) {
+  const char *s = strrchr(p, '/');
+  return s ? s + 1 : p;
+}
+
+static int copy_file(const char *src, const char *dst) {
+  int in = open(src, O_RDONLY);
+  if (in < 0) {
+    return -1;
+  }
+  struct stat st;
+  mode_t mode = 0644;
+  if (fstat(in, &st) == 0) {
+    mode = st.st_mode & 0777;
+  }
+  int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode);
+  if (out < 0) {
+    close(in);
+    return -1;
+  }
+  char buf[8192];
+  ssize_t r;
+  int rc = 0;
+  while ((r = read(in, buf, sizeof(buf))) > 0) {
+    ssize_t off = 0;
+    while (off < r) {
+      ssize_t w = write(out, buf + off, (size_t)(r - off));
+      if (w <= 0) {
+        rc = -1;
+        break;
+      }
+      off += w;
+    }
+    if (rc) {
+      break;
+    }
+  }
+  if (r < 0) {
+    rc = -1;
+  }
+  close(in);
+  close(out);
+  return rc;
+}
+
+static int copy_recursive(const char *src, const char *dst) {
+  struct stat st;
+  if (stat(src, &st) != 0) {
+    return -1;
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    return copy_file(src, dst);
+  }
+  if (mkdir(dst, st.st_mode & 0777) != 0 && errno != EEXIST) {
+    return -1;
+  }
+  DIR *d = opendir(src);
+  if (!d) {
+    return -1;
+  }
+  struct dirent *e;
+  int rc = 0;
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
+      continue;
+    }
+    char s2[PATH_MAX], d2[PATH_MAX];
+    snprintf(s2, sizeof(s2), "%s/%s", src, e->d_name);
+    snprintf(d2, sizeof(d2), "%s/%s", dst, e->d_name);
+    if (copy_recursive(s2, d2) != 0) {
+      rc = -1;
+    }
+  }
+  closedir(d);
+  return rc;
+}
+
+static int remove_recursive(const char *path) {
+  struct stat st;
+  if (lstat(path, &st) != 0) {
+    return -1;
+  }
+  if (!S_ISDIR(st.st_mode)) {
+    return unlink(path);
+  }
+  DIR *d = opendir(path);
+  if (!d) {
+    return -1;
+  }
+  struct dirent *e;
+  int rc = 0;
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
+      continue;
+    }
+    char c[PATH_MAX];
+    snprintf(c, sizeof(c), "%s/%s", path, e->d_name);
+    if (remove_recursive(c) != 0) {
+      rc = -1;
+    }
+  }
+  closedir(d);
+  if (rmdir(path) != 0) {
+    rc = -1;
+  }
+  return rc;
+}
+
+static int mkdir_p(const char *path) {
+  char tmp[PATH_MAX];
+  snprintf(tmp, sizeof(tmp), "%s", path);
+  for (char *p = tmp + 1; *p; p++) {
+    if (*p == '/') {
+      *p = '\0';
+      if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        return -1;
+      }
+      *p = '/';
+    }
+  }
+  if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+    return -1;
+  }
+  return 0;
+}
+
+/* --- filesystem commands ---------------------------------------------- */
+
+static int cmd_mkdir(int argc, char **argv, struct shell_ctx *ctx) {
+  int parents = 0, start = 1, rc = 0;
+  if (argc > 1 && strcmp(argv[1], "-p") == 0) {
+    parents = 1;
+    start = 2;
+  }
+  if (argc <= start) {
+    cerror(ctx, "mkdir: missing operand\n");
+    return 1;
+  }
+  for (int a = start; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    int r = parents ? mkdir_p(path) : mkdir(path, 0755);
+    if (r != 0) {
+      cerror(ctx, "mkdir: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      rc = 1;
+    }
+  }
+  return rc;
+}
+
+static int cmd_rmdir(int argc, char **argv, struct shell_ctx *ctx) {
+  if (argc < 2) {
+    cerror(ctx, "rmdir: missing operand\n");
+    return 1;
+  }
+  int rc = 0;
+  for (int a = 1; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    if (rmdir(path) != 0) {
+      cerror(ctx, "rmdir: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      rc = 1;
+    }
+  }
+  return rc;
+}
+
+static int cmd_touch(int argc, char **argv, struct shell_ctx *ctx) {
+  if (argc < 2) {
+    cerror(ctx, "touch: missing operand\n");
+    return 1;
+  }
+  int rc = 0;
+  for (int a = 1; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) {
+      cerror(ctx, "touch: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      rc = 1;
+      continue;
+    }
+    close(fd);
+    (void)utimensat(AT_FDCWD, path, NULL, 0);
+  }
+  return rc;
+}
+
+static int cmd_rm(int argc, char **argv, struct shell_ctx *ctx) {
+  int recursive = 0, force = 0, start = 1, rc = 0;
+  while (start < argc && argv[start][0] == '-' && argv[start][1] != '\0') {
+    for (const char *o = argv[start] + 1; *o; o++) {
+      if (*o == 'r' || *o == 'R') {
+        recursive = 1;
+      } else if (*o == 'f') {
+        force = 1;
+      } else {
+        cerror(ctx, "rm: unknown option\n");
+        return 1;
+      }
+    }
+    start++;
+  }
+  if (start >= argc) {
+    if (force) {
+      return 0;
+    }
+    cerror(ctx, "rm: missing operand\n");
+    return 1;
+  }
+  for (int a = start; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    struct stat st;
+    if (stat(path, &st) != 0) {
+      if (!force) {
+        cerror(ctx, "rm: ");
+        cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+        rc = 1;
+      }
+      continue;
+    }
+    if (S_ISDIR(st.st_mode)) {
+      if (!recursive) {
+        cerror(ctx, "rm: ");
+        cprintf(ctx, "%s: is a directory\n", argv[a]);
+        rc = 1;
+        continue;
+      }
+      if (remove_recursive(path) != 0 && !force) {
+        cerror(ctx, "rm: ");
+        cprintf(ctx, "%s: failed to remove\n", argv[a]);
+        rc = 1;
+      }
+    } else {
+      if (unlink(path) != 0 && !force) {
+        cerror(ctx, "rm: ");
+        cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+        rc = 1;
+      }
+    }
+  }
+  return rc;
+}
+
+static int cmd_cp(int argc, char **argv, struct shell_ctx *ctx) {
+  int recursive = 0, start = 1;
+  while (start < argc && argv[start][0] == '-' && argv[start][1] != '\0') {
+    for (const char *o = argv[start] + 1; *o; o++) {
+      if (*o == 'r' || *o == 'R') {
+        recursive = 1;
+      } else {
+        cerror(ctx, "cp: unknown option\n");
+        return 1;
+      }
+    }
+    start++;
+  }
+  if (argc - start < 2) {
+    cerror(ctx, "cp: need source and destination\n");
+    return 1;
+  }
+  char dst[PATH_MAX];
+  resolve_path(ctx, argv[argc - 1], dst, sizeof(dst));
+  struct stat dstat;
+  int dst_is_dir = (stat(dst, &dstat) == 0 && S_ISDIR(dstat.st_mode));
+  if ((argc - 1 - start) > 1 && !dst_is_dir) {
+    cerror(ctx, "cp: destination must be a directory\n");
+    return 1;
+  }
+  int rc = 0;
+  for (int a = start; a < argc - 1; a++) {
+    char src[PATH_MAX];
+    resolve_path(ctx, argv[a], src, sizeof(src));
+    struct stat st;
+    if (stat(src, &st) != 0) {
+      cerror(ctx, "cp: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      rc = 1;
+      continue;
+    }
+    char target[PATH_MAX];
+    if (dst_is_dir) {
+      snprintf(target, sizeof(target), "%s/%s", dst, base_name(src));
+    } else {
+      snprintf(target, sizeof(target), "%s", dst);
+    }
+    if (S_ISDIR(st.st_mode)) {
+      if (!recursive) {
+        cerror(ctx, "cp: ");
+        cprintf(ctx, "%s: is a directory (use -r)\n", argv[a]);
+        rc = 1;
+        continue;
+      }
+      if (copy_recursive(src, target) != 0) {
+        cerror(ctx, "cp: ");
+        cprintf(ctx, "%s: copy failed\n", argv[a]);
+        rc = 1;
+      }
+    } else {
+      if (copy_file(src, target) != 0) {
+        cerror(ctx, "cp: ");
+        cprintf(ctx, "%s: copy failed\n", argv[a]);
+        rc = 1;
+      }
+    }
+  }
+  return rc;
+}
+
+static int cmd_mv(int argc, char **argv, struct shell_ctx *ctx) {
+  if (argc < 3) {
+    cerror(ctx, "mv: need source and destination\n");
+    return 1;
+  }
+  char dst[PATH_MAX];
+  resolve_path(ctx, argv[argc - 1], dst, sizeof(dst));
+  struct stat dstat;
+  int dst_is_dir = (stat(dst, &dstat) == 0 && S_ISDIR(dstat.st_mode));
+  if ((argc - 2) > 1 && !dst_is_dir) {
+    cerror(ctx, "mv: destination must be a directory\n");
+    return 1;
+  }
+  int rc = 0;
+  for (int a = 1; a < argc - 1; a++) {
+    char src[PATH_MAX];
+    resolve_path(ctx, argv[a], src, sizeof(src));
+    char target[PATH_MAX];
+    if (dst_is_dir) {
+      snprintf(target, sizeof(target), "%s/%s", dst, base_name(src));
+    } else {
+      snprintf(target, sizeof(target), "%s", dst);
+    }
+    if (rename(src, target) == 0) {
+      continue;
+    }
+    if (errno == EXDEV) {
+      /* cross-device move: copy then remove the source */
+      struct stat st;
+      if (stat(src, &st) != 0) {
+        cerror(ctx, "mv: ");
+        cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+        rc = 1;
+        continue;
+      }
+      int cr = S_ISDIR(st.st_mode) ? copy_recursive(src, target)
+                                   : copy_file(src, target);
+      if (cr != 0 || remove_recursive(src) != 0) {
+        cerror(ctx, "mv: ");
+        cprintf(ctx, "%s: move failed\n", argv[a]);
+        rc = 1;
+      }
+    } else {
+      cerror(ctx, "mv: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      rc = 1;
+    }
+  }
+  return rc;
+}
+
 /* --- dispatch table ---------------------------------------------------- */
 
 struct command {
@@ -393,6 +761,8 @@ static const struct command COMMANDS[] = {
     {"pwd", cmd_pwd},     {"cd", cmd_cd},       {"ls", cmd_ls},
     {"cat", cmd_cat},     {"echo", cmd_echo},   {"whoami", cmd_whoami},
     {"uname", cmd_uname}, {"clear", cmd_clear}, {"help", cmd_help},
+    {"mkdir", cmd_mkdir}, {"rmdir", cmd_rmdir}, {"touch", cmd_touch},
+    {"rm", cmd_rm},       {"cp", cmd_cp},       {"mv", cmd_mv},
     {"exit", cmd_exit},   {"quit", cmd_exit},
 };
 static const int N_COMMANDS = (int)(sizeof(COMMANDS) / sizeof(COMMANDS[0]));

@@ -26,7 +26,7 @@
 #define ZSSHD_PORT 22
 #endif
 #ifndef ZSSHD_VERSION
-#define ZSSHD_VERSION "0.0.2"
+#define ZSSHD_VERSION "0.0.3"
 #endif
 #ifndef ZSSHD_DIR
 #define ZSSHD_DIR "/data/zsshd"
@@ -362,15 +362,20 @@ int ssh_server_run(void) {
 
     pthread_t t;
     pthread_attr_t attr;
-    int detached = pthread_attr_init(&attr) == 0 &&
-                   pthread_attr_setdetachstate(&attr,
-                                               PTHREAD_CREATE_DETACHED) == 0;
-    if (pthread_create(&t, detached ? &attr : NULL, handle_session,
+    int have_attr = (pthread_attr_init(&attr) == 0);
+    if (have_attr) {
+      (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+      /* libssh's handshake plus the shell's recursive cp/rm need more than the
+       * small default thread stack; a too-small stack segfaults the whole
+       * payload, since every connection shares this process. */
+      (void)pthread_attr_setstacksize(&attr, 1024 * 1024);
+    }
+    if (pthread_create(&t, have_attr ? &attr : NULL, handle_session,
                        session) != 0) {
       ssh_disconnect(session);
       ssh_free(session);
     }
-    if (detached) {
+    if (have_attr) {
       (void)pthread_attr_destroy(&attr);
     }
   }
