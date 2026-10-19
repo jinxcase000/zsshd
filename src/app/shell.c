@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <regex.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -750,6 +751,173 @@ static int cmd_mv(int argc, char **argv, struct shell_ctx *ctx) {
   return rc;
 }
 
+/* --- text commands (stage 2c) ----------------------------------------- */
+
+static int head_tail_nlines(int argc, char **argv, int *start) {
+  int nlines = 10;
+  *start = 1;
+  if (argc > 2 && strcmp(argv[1], "-n") == 0) {
+    nlines = atoi(argv[2]);
+    *start = 3;
+  }
+  if (nlines < 0) {
+    nlines = 0;
+  }
+  return nlines;
+}
+
+static int cmd_head(int argc, char **argv, struct shell_ctx *ctx) {
+  int start;
+  int nlines = head_tail_nlines(argc, argv, &start);
+  if (start >= argc) {
+    cerror(ctx, "head: missing file operand\n");
+    return 1;
+  }
+  int multiple = (argc - start) > 1, rc = 0;
+  for (int a = start; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) {
+      cerror(ctx, "head: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      rc = 1;
+      continue;
+    }
+    if (multiple) {
+      cprintf(ctx, "==> %s <==\n", argv[a]);
+    }
+    char line[4096];
+    int count = 0;
+    while (count < nlines && fgets(line, sizeof(line), f)) {
+      cout(ctx, line, strlen(line));
+      count++;
+    }
+    fclose(f);
+    if (multiple && a + 1 < argc) {
+      cputs(ctx, "\n");
+    }
+  }
+  return rc;
+}
+
+static int cmd_tail(int argc, char **argv, struct shell_ctx *ctx) {
+  int start;
+  int nlines = head_tail_nlines(argc, argv, &start);
+  if (start >= argc) {
+    cerror(ctx, "tail: missing file operand\n");
+    return 1;
+  }
+  int multiple = (argc - start) > 1, rc = 0;
+  for (int a = start; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) {
+      cerror(ctx, "tail: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      rc = 1;
+      continue;
+    }
+    if (multiple) {
+      cprintf(ctx, "==> %s <==\n", argv[a]);
+    }
+    if (nlines > 0) {
+      /* keep only the last N lines in a ring of heap strings */
+      char **ring = calloc((size_t)nlines, sizeof(char *));
+      if (!ring) {
+        fclose(f);
+        cerror(ctx, "tail: out of memory\n");
+        rc = 1;
+        continue;
+      }
+      char line[4096];
+      int idx = 0, filled = 0;
+      while (fgets(line, sizeof(line), f)) {
+        free(ring[idx]);
+        ring[idx] = strdup(line);
+        idx = (idx + 1) % nlines;
+        if (filled < nlines) {
+          filled++;
+        }
+      }
+      int begin = (filled < nlines) ? 0 : idx;
+      for (int i = 0; i < filled; i++) {
+        char *ln = ring[(begin + i) % nlines];
+        if (ln) {
+          cout(ctx, ln, strlen(ln));
+        }
+      }
+      for (int i = 0; i < nlines; i++) {
+        free(ring[i]);
+      }
+      free(ring);
+    }
+    fclose(f);
+    if (multiple && a + 1 < argc) {
+      cputs(ctx, "\n");
+    }
+  }
+  return rc;
+}
+
+static int cmd_grep(int argc, char **argv, struct shell_ctx *ctx) {
+  int cflags = REG_EXTENDED | REG_NOSUB, start = 1;
+  while (start < argc && argv[start][0] == '-' && argv[start][1] != '\0') {
+    for (const char *o = argv[start] + 1; *o; o++) {
+      if (*o == 'i') {
+        cflags |= REG_ICASE;
+      } else {
+        cerror(ctx, "grep: unknown option\n");
+        return 1;
+      }
+    }
+    start++;
+  }
+  if (argc - start < 2) {
+    cerror(ctx, "grep: usage: grep [-i] pattern file...\n");
+    return 1;
+  }
+  const char *pat = argv[start++];
+  regex_t re;
+  if (regcomp(&re, pat, cflags) != 0) {
+    cerror(ctx, "grep: invalid pattern\n");
+    return 1;
+  }
+  int multiple = (argc - start) > 1, matched = 0;
+  for (int a = start; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) {
+      cerror(ctx, "grep: ");
+      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+      continue;
+    }
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+      size_t L = strlen(line);
+      if (L > 0 && line[L - 1] == '\n') {
+        line[L - 1] = '\0';
+      }
+      if (regexec(&re, line, 0, NULL, 0) == 0) {
+        if (multiple) {
+          craw(ctx, C_PATH);
+          craw(ctx, argv[a]);
+          craw(ctx, C_RESET);
+          craw(ctx, ":");
+        }
+        cputs(ctx, line);
+        cputs(ctx, "\n");
+        matched = 1;
+      }
+    }
+    fclose(f);
+  }
+  regfree(&re);
+  return matched ? 0 : 1;
+}
+
 /* --- dispatch table ---------------------------------------------------- */
 
 struct command {
@@ -763,6 +931,8 @@ static const struct command COMMANDS[] = {
     {"uname", cmd_uname}, {"clear", cmd_clear}, {"help", cmd_help},
     {"mkdir", cmd_mkdir}, {"rmdir", cmd_rmdir}, {"touch", cmd_touch},
     {"rm", cmd_rm},       {"cp", cmd_cp},       {"mv", cmd_mv},
+    {"head", cmd_head},   {"tail", cmd_tail},   {"grep", cmd_grep},
+    {"less", cmd_cat},
     {"exit", cmd_exit},   {"quit", cmd_exit},
 };
 static const int N_COMMANDS = (int)(sizeof(COMMANDS) / sizeof(COMMANDS[0]));
@@ -812,15 +982,36 @@ static void dispatch(struct shell_ctx *ctx, char *line) {
   cerror(ctx, "%s: command not found\n", argv[0]);
 }
 
-/* Erase the currently typed line on screen and replace it with `repl`. */
+/* Erase the currently typed line on screen and replace it with `repl`,
+ * leaving the cursor at the end. */
 static void replace_line(struct shell_ctx *ctx, char *line, size_t *len,
-                         const char *repl) {
+                         size_t *pos, const char *repl) {
+  /* move the cursor to the end of the current content first */
+  if (*pos < *len) {
+    ssh_channel_write(ctx->channel, line + *pos, (uint32_t)(*len - *pos));
+  }
   for (size_t i = 0; i < *len; i++) {
     craw(ctx, "\b \b");
   }
   snprintf(line, LINE_MAX_LEN, "%s", repl);
   *len = strlen(line);
+  *pos = *len;
   ssh_channel_write(ctx->channel, line, (uint32_t)*len);
+}
+
+/* Reprint line[pos..] after an insert/delete and park the cursor back at pos. */
+static void redraw_tail(struct shell_ctx *ctx, const char *line, size_t len,
+                        size_t pos, int erased_one) {
+  if (len > pos) {
+    ssh_channel_write(ctx->channel, line + pos, (uint32_t)(len - pos));
+  }
+  if (erased_one) {
+    craw(ctx, " ");
+  }
+  size_t back = (len - pos) + (erased_one ? 1 : 0);
+  for (size_t k = 0; k < back; k++) {
+    craw(ctx, "\b");
+  }
 }
 
 /* fish-style prompt: green user@host, cyan path, bold prompt glyph */
@@ -855,9 +1046,12 @@ void shell_run(ssh_channel channel) {
   prompt(&ctx);
 
   char line[LINE_MAX_LEN];
-  size_t len = 0;
+  size_t len = 0; /* total chars in line   */
+  size_t pos = 0; /* cursor index (0..len) */
   char buf[512];
-  int esc = 0; /* 0 normal, 1 saw ESC, 2 saw ESC[ */
+  int esc = 0;      /* 0 normal, 1 saw ESC, 2 in CSI */
+  char csi[8];
+  int csilen = 0;
   while (ctx.running) {
     int n = ssh_channel_read(channel, buf, sizeof(buf), 0);
     if (n <= 0) {
@@ -866,25 +1060,75 @@ void shell_run(ssh_channel channel) {
     for (int i = 0; i < n && ctx.running; i++) {
       char c = buf[i];
 
-      /* --- escape-sequence state machine (arrow keys) --- */
+      /* --- escape-sequence (CSI) state machine --- */
       if (esc == 1) {
-        esc = (c == '[') ? 2 : 0;
+        if (c == '[') {
+          esc = 2;
+          csilen = 0;
+        } else {
+          esc = 0;
+        }
         continue;
       }
       if (esc == 2) {
+        if ((c >= '0' && c <= '9') || c == ';') {
+          if (csilen < (int)sizeof(csi) - 1) {
+            csi[csilen++] = c;
+          }
+          continue;
+        }
+        csi[csilen] = '\0';
         if (c == 'A' && ctx.history && ctx.hist_pos > 0) { /* up */
           ctx.hist_pos--;
-          replace_line(&ctx, line, &len, ctx.history[ctx.hist_pos]);
+          replace_line(&ctx, line, &len, &pos, ctx.history[ctx.hist_pos]);
         } else if (c == 'B' && ctx.history) { /* down */
           if (ctx.hist_pos < ctx.hist_count - 1) {
             ctx.hist_pos++;
-            replace_line(&ctx, line, &len, ctx.history[ctx.hist_pos]);
+            replace_line(&ctx, line, &len, &pos, ctx.history[ctx.hist_pos]);
           } else {
             ctx.hist_pos = ctx.hist_count;
-            replace_line(&ctx, line, &len, "");
+            replace_line(&ctx, line, &len, &pos, "");
+          }
+        } else if (c == 'C') { /* right */
+          if (pos < len) {
+            ssh_channel_write(channel, &line[pos], 1);
+            pos++;
+          }
+        } else if (c == 'D') { /* left */
+          if (pos > 0) {
+            pos--;
+            craw(&ctx, "\b");
+          }
+        } else if (c == 'H') { /* home */
+          while (pos > 0) {
+            pos--;
+            craw(&ctx, "\b");
+          }
+        } else if (c == 'F') { /* end */
+          while (pos < len) {
+            ssh_channel_write(channel, &line[pos], 1);
+            pos++;
+          }
+        } else if (c == '~') {
+          if (strcmp(csi, "3") == 0) { /* delete key: remove char at cursor */
+            if (pos < len) {
+              memmove(line + pos, line + pos + 1, len - pos - 1);
+              len--;
+              redraw_tail(&ctx, line, len, pos, 1);
+            }
+          } else if (strcmp(csi, "1") == 0 || strcmp(csi, "7") == 0) {
+            while (pos > 0) {
+              pos--;
+              craw(&ctx, "\b");
+            }
+          } else if (strcmp(csi, "4") == 0 || strcmp(csi, "8") == 0) {
+            while (pos < len) {
+              ssh_channel_write(channel, &line[pos], 1);
+              pos++;
+            }
           }
         }
-        esc = 0; /* ignore C/D and anything else for now */
+        esc = 0;
         continue;
       }
       if (c == 0x1b) {
@@ -912,24 +1156,36 @@ void shell_run(ssh_channel channel) {
         }
         dispatch(&ctx, line);
         len = 0;
+        pos = 0;
         if (ctx.running) {
           prompt(&ctx);
         }
-      } else if (c == 0x7f || c == 0x08) {
-        if (len > 0) {
+      } else if (c == 0x7f || c == 0x08) { /* backspace: delete before cursor */
+        if (pos > 0) {
+          memmove(line + pos - 1, line + pos, len - pos);
           len--;
-          craw(&ctx, "\b \b");
+          pos--;
+          craw(&ctx, "\b");
+          redraw_tail(&ctx, line, len, pos, 1);
         }
       } else if (c == 0x03) { /* Ctrl-C */
         craw(&ctx, "^C\r\n");
         len = 0;
+        pos = 0;
         if (ctx.history) {
           ctx.hist_pos = ctx.hist_count;
         }
         prompt(&ctx);
-      } else if (len + 1 < sizeof(line) && c >= 0x20) {
-        line[len++] = c;
-        ssh_channel_write(channel, &c, 1);
+      } else if (c >= 0x20 && c != 0x7f && len + 1 < sizeof(line)) {
+        /* insert at cursor */
+        memmove(line + pos + 1, line + pos, len - pos);
+        line[pos] = c;
+        len++;
+        ssh_channel_write(channel, &line[pos], (uint32_t)(len - pos));
+        pos++;
+        for (size_t k = 0; k < len - pos; k++) {
+          craw(&ctx, "\b");
+        }
       }
     }
   }
