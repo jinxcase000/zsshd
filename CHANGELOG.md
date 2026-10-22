@@ -3,6 +3,22 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.3.0] - 2026-10-22
+### Added
+- SFTP subsystem: `sftp` and `scp` (and file-manager GUIs) now work, backed by
+  libssh 0.12's built-in SFTP server over the local filesystem.
+- Server prefers hardware-accelerated AES-GCM ciphers (the PS5 CPU has AES-NI)
+  for better transfer throughput, falling back to AES-CTR then chacha20.
+
+### Note
+- SFTP runs inside the encrypted SSH channel, so it is not as fast as the
+  plaintext `zftpd` FTP payload; it is the secure/convenient transfer path,
+  not the max-throughput one.
+- libssh 0.12's built-in SFTP server does not implement `rename`, `fsetstat`
+  or `fstat`. Upload/download/listing/mkdir/rmdir/remove/stat/symlink all work;
+  `scp` prints a harmless `fsetstat: Operation unsupported` after upload (file
+  is fine), and SFTP rename fails (use the shell: `mv`).
+
 ## [0.2.0] - 2026-10-22
 ### Added
 - Non-interactive / scriptable access, so other mods can automate the payload:
