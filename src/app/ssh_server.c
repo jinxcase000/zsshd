@@ -40,6 +40,9 @@ static volatile sig_atomic_t g_running = 0;
 struct session_state {
   int authenticated;
   int channel_wanted_shell;
+  int pty_requested;
+  int exec_requested;
+  char exec_cmd[2048];
   ssh_channel channel;
 };
 
@@ -168,7 +171,8 @@ static int pty_request_cb(ssh_session session, ssh_channel channel,
   (void)rows;
   (void)px;
   (void)py;
-  (void)userdata;
+  struct session_state *st = (struct session_state *)userdata;
+  st->pty_requested = 1;
   return 0; /* accept the pty */
 }
 
@@ -179,6 +183,16 @@ static int shell_request_cb(ssh_session session, ssh_channel channel,
   struct session_state *st = (struct session_state *)userdata;
   st->channel_wanted_shell = 1;
   return 0; /* accept the shell */
+}
+
+static int exec_request_cb(ssh_session session, ssh_channel channel,
+                           const char *command, void *userdata) {
+  (void)session;
+  (void)channel;
+  struct session_state *st = (struct session_state *)userdata;
+  snprintf(st->exec_cmd, sizeof(st->exec_cmd), "%s", command ? command : "");
+  st->exec_requested = 1;
+  return 0; /* accept the exec request */
 }
 
 static ssh_channel channel_open_cb(ssh_session session, void *userdata) {
@@ -223,6 +237,7 @@ static void *handle_session(void *arg) {
   channel_cb.userdata = &st;
   channel_cb.channel_pty_request_function = pty_request_cb;
   channel_cb.channel_shell_request_function = shell_request_cb;
+  channel_cb.channel_exec_request_function = exec_request_cb;
   ssh_callbacks_init(&channel_cb);
 
   ssh_event event = ssh_event_new();
@@ -231,7 +246,8 @@ static void *handle_session(void *arg) {
   /* Pump the event loop until the client authenticates and asks for a shell
    * on a session channel. */
   int set_channel_cb = 0;
-  while (g_running && !(st.authenticated && st.channel_wanted_shell)) {
+  while (g_running && !(st.authenticated &&
+                        (st.channel_wanted_shell || st.exec_requested))) {
     if (ssh_event_dopoll(event, 500) == SSH_ERROR) {
       break;
     }
@@ -241,8 +257,16 @@ static void *handle_session(void *arg) {
     }
   }
 
-  if (st.authenticated && st.channel && st.channel_wanted_shell) {
-    shell_run(st.channel);
+  if (st.authenticated && st.channel) {
+    int status = 0;
+    if (st.exec_requested) {
+      /* `ssh host 'command'` */
+      status = shell_exec(st.channel, st.exec_cmd);
+    } else if (st.channel_wanted_shell) {
+      /* interactive iff the client asked for a PTY; otherwise scripted stdin */
+      shell_run(st.channel, st.pty_requested);
+    }
+    ssh_channel_request_send_exit_status(st.channel, status);
     ssh_channel_send_eof(st.channel);
     ssh_channel_close(st.channel);
   }

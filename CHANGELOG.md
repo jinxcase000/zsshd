@@ -3,6 +3,18 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.2.0] - 2026-10-22
+### Added
+- Non-interactive / scriptable access, so other mods can automate the payload:
+  - SSH `exec` requests: `ssh root@ps5 'mkdir /data/x; ls /data'` runs the
+    command(s) and returns their exit status.
+  - Batch stdin: piping commands to a no-PTY session runs them line by line
+    with no banner, prompt, echo or colour.
+  - `;` and newlines separate multiple commands on one line everywhere.
+  - Commands return an exit status, reported back to the SSH client.
+- Colour/escape output is suppressed automatically when the session has no PTY,
+  keeping scripted output clean.
+
 ## [0.1.0] - 2026-10-18
 ### Changed
 - Upgraded the libssh dependency from 0.11.1 to 0.12.2 (built against the same
