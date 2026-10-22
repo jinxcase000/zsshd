@@ -39,6 +39,8 @@ struct shell_ctx {
   char host[64];
   int running;
   int color;
+  int interactive;
+  int rows;
   char (*history)[HIST_LINE];
   int hist_count;
   int hist_pos;
@@ -927,6 +929,71 @@ static int cmd_grep(int argc, char **argv, struct shell_ctx *ctx) {
   return matched ? 0 : 1;
 }
 
+/* 'more'-style pager for `less`/`more`. Paginates only with a TTY; when the
+ * session is scripted/piped it behaves like cat (matching real less). */
+static int cmd_pager(int argc, char **argv, struct shell_ctx *ctx) {
+  if (argc < 2) {
+    cerror(ctx, "less: missing file operand\n");
+    return 1;
+  }
+  int rc = 0;
+  for (int a = 1; a < argc; a++) {
+    char path[PATH_MAX];
+    resolve_path(ctx, argv[a], path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) {
+      cerror(ctx, "less: ");
+      cprintf(ctx, "%s: cannot open\n", argv[a]);
+      rc = 1;
+      continue;
+    }
+    if (!ctx->interactive) {
+      /* no TTY: dump like cat */
+      char buf[4096];
+      size_t n;
+      while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        cout(ctx, buf, n);
+      }
+      fclose(f);
+      continue;
+    }
+    int rows = ctx->rows > 1 ? ctx->rows : 24;
+    int page = rows - 1; /* leave a row for the --More-- prompt */
+    if (page < 1) {
+      page = 1;
+    }
+    char line[4096];
+    int shown = 0;
+    int quit = 0;
+    while (!quit && fgets(line, sizeof(line), f)) {
+      size_t L = strlen(line);
+      cout(ctx, line, L);
+      if (L == 0 || line[L - 1] != '\n') {
+        cout(ctx, "\n", 1);
+      }
+      shown++;
+      if (shown >= page) {
+        craw(ctx, "\033[7m--More--\033[0m"); /* reverse-video prompt */
+        char k;
+        int kn = ssh_channel_read(ctx->channel, &k, 1, 0);
+        craw(ctx, "\r\033[K"); /* erase the prompt line */
+        if (kn <= 0 || k == 'q' || k == 'Q') {
+          quit = 1;
+        } else if (k == '\r' || k == '\n') {
+          shown = page - 1; /* advance one line */
+        } else {
+          shown = 0; /* space / anything else: next full page */
+        }
+      }
+    }
+    fclose(f);
+    if (quit) {
+      break;
+    }
+  }
+  return rc;
+}
+
 /* --- dispatch table ---------------------------------------------------- */
 
 struct command {
@@ -941,7 +1008,7 @@ static const struct command COMMANDS[] = {
     {"mkdir", cmd_mkdir}, {"rmdir", cmd_rmdir}, {"touch", cmd_touch},
     {"rm", cmd_rm},       {"cp", cmd_cp},       {"mv", cmd_mv},
     {"head", cmd_head},   {"tail", cmd_tail},   {"grep", cmd_grep},
-    {"less", cmd_cat},
+    {"less", cmd_pager},  {"more", cmd_pager},
     {"exit", cmd_exit},   {"quit", cmd_exit},
 };
 static const int N_COMMANDS = (int)(sizeof(COMMANDS) / sizeof(COMMANDS[0]));
@@ -1090,7 +1157,7 @@ static void prompt(struct shell_ctx *ctx) {
   craw(ctx, " \342\235\257 "); /* UTF-8 for fish's ❯ */
 }
 
-void shell_run(ssh_channel channel, int interactive) {
+void shell_run(ssh_channel channel, int interactive, int rows) {
   struct shell_ctx ctx;
   ctx.channel = channel;
   ctx.running = 1;
@@ -1102,6 +1169,8 @@ void shell_run(ssh_channel channel, int interactive) {
   ctx.hist_count = 0;
   ctx.hist_pos = 0;
   ctx.color = interactive;
+  ctx.interactive = interactive;
+  ctx.rows = rows;
 
   if (!interactive) {
     run_batch(&ctx);
@@ -1268,6 +1337,8 @@ int shell_exec(ssh_channel channel, const char *command) {
   ctx.channel = channel;
   ctx.running = 1;
   ctx.color = 0; /* scripted: clean, uncoloured output */
+  ctx.interactive = 0;
+  ctx.rows = 0;
   snprintf(ctx.cwd, sizeof(ctx.cwd), "/");
   if (gethostname(ctx.host, sizeof(ctx.host)) != 0 || ctx.host[0] == '\0') {
     snprintf(ctx.host, sizeof(ctx.host), "ps5");
@@ -1280,9 +1351,10 @@ int shell_exec(ssh_channel channel, const char *command) {
 
 #else /* !PLATFORM_PS5 */
 
-void shell_run(ssh_channel channel, int interactive) {
+void shell_run(ssh_channel channel, int interactive, int rows) {
   (void)channel;
   (void)interactive;
+  (void)rows;
 }
 int shell_exec(ssh_channel channel, const char *command) {
   (void)channel;

@@ -3,6 +3,13 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.4.0] - 2026-10-22
+### Added
+- `more`-style pager: `less` and `more` paginate output in an interactive
+  session (Space = next page, Enter = one more line, `q` = quit). With no TTY
+  (scripted/piped) they fall back to `cat` behaviour.
+- The shell captures the client's PTY row count, used for paging.
+
 ## [0.3.0] - 2026-10-22
 ### Added
 - SFTP subsystem: `sftp` and `scp` (and file-manager GUIs) now work, backed by
