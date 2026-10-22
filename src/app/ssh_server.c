@@ -5,6 +5,8 @@
 #include <libssh/libssh.h>
 #include <libssh/server.h>
 #include <libssh/callbacks.h>
+#include <libssh/sftp.h>
+#include <libssh/sftpserver.h>
 
 #include "shell.h"
 #include "pal_notification.h"
@@ -43,6 +45,9 @@ struct session_state {
   int pty_requested;
   int exec_requested;
   char exec_cmd[2048];
+  int sftp_requested;
+  sftp_session sftp;
+  struct ssh_channel_callbacks_struct sftp_data_cb;
   ssh_channel channel;
 };
 
@@ -195,6 +200,29 @@ static int exec_request_cb(ssh_session session, ssh_channel channel,
   return 0; /* accept the exec request */
 }
 
+static int subsystem_request_cb(ssh_session session, ssh_channel channel,
+                                const char *subsystem, void *userdata) {
+  struct session_state *st = (struct session_state *)userdata;
+  if (strcmp(subsystem, "sftp") != 0) {
+    return SSH_ERROR; /* only the sftp subsystem is supported */
+  }
+  /* Spin up libssh's built-in SFTP server on this channel. */
+  if (sftp_channel_default_subsystem_request(session, channel, subsystem,
+                                             &st->sftp) != SSH_OK) {
+    return SSH_ERROR;
+  }
+  /* Route subsequent channel data to the default SFTP handler. Its userdata
+   * must be the sftp_session pointer, so this is a separate callback struct
+   * from our control callbacks (which carry session_state). */
+  memset(&st->sftp_data_cb, 0, sizeof(st->sftp_data_cb));
+  st->sftp_data_cb.userdata = &st->sftp;
+  st->sftp_data_cb.channel_data_function = sftp_channel_default_data_callback;
+  ssh_callbacks_init(&st->sftp_data_cb);
+  ssh_add_channel_callbacks(channel, &st->sftp_data_cb);
+  st->sftp_requested = 1;
+  return SSH_OK;
+}
+
 static ssh_channel channel_open_cb(ssh_session session, void *userdata) {
   struct session_state *st = (struct session_state *)userdata;
   if (st->channel) {
@@ -238,6 +266,7 @@ static void *handle_session(void *arg) {
   channel_cb.channel_pty_request_function = pty_request_cb;
   channel_cb.channel_shell_request_function = shell_request_cb;
   channel_cb.channel_exec_request_function = exec_request_cb;
+  channel_cb.channel_subsystem_request_function = subsystem_request_cb;
   ssh_callbacks_init(&channel_cb);
 
   ssh_event event = ssh_event_new();
@@ -247,7 +276,8 @@ static void *handle_session(void *arg) {
    * on a session channel. */
   int set_channel_cb = 0;
   while (g_running && !(st.authenticated &&
-                        (st.channel_wanted_shell || st.exec_requested))) {
+                        (st.channel_wanted_shell || st.exec_requested ||
+                         st.sftp_requested))) {
     if (ssh_event_dopoll(event, 500) == SSH_ERROR) {
       break;
     }
@@ -258,17 +288,34 @@ static void *handle_session(void *arg) {
   }
 
   if (st.authenticated && st.channel) {
-    int status = 0;
-    if (st.exec_requested) {
-      /* `ssh host 'command'` */
-      status = shell_exec(st.channel, st.exec_cmd);
-    } else if (st.channel_wanted_shell) {
-      /* interactive iff the client asked for a PTY; otherwise scripted stdin */
-      shell_run(st.channel, st.pty_requested);
+    if (st.sftp_requested) {
+      /* SFTP: libssh's default callbacks drive the protocol off incoming
+       * channel data, so just pump the event loop until the client is done. */
+      while (g_running && ssh_channel_is_open(st.channel) &&
+             !ssh_channel_is_eof(st.channel)) {
+        if (ssh_event_dopoll(event, 500) == SSH_ERROR) {
+          break;
+        }
+      }
+      if (st.sftp) {
+        sftp_free(st.sftp);
+        st.sftp = NULL;
+      }
+      ssh_channel_send_eof(st.channel);
+      ssh_channel_close(st.channel);
+    } else {
+      int status = 0;
+      if (st.exec_requested) {
+        /* `ssh host 'command'` */
+        status = shell_exec(st.channel, st.exec_cmd);
+      } else if (st.channel_wanted_shell) {
+        /* interactive iff a PTY was requested; otherwise scripted stdin */
+        shell_run(st.channel, st.pty_requested);
+      }
+      ssh_channel_request_send_exit_status(st.channel, status);
+      ssh_channel_send_eof(st.channel);
+      ssh_channel_close(st.channel);
     }
-    ssh_channel_request_send_exit_status(st.channel, status);
-    ssh_channel_send_eof(st.channel);
-    ssh_channel_close(st.channel);
   }
 
   ssh_event_free(event);
@@ -352,6 +399,15 @@ int ssh_server_run(void) {
   int port = ZSSHD_PORT;
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_BINDPORT, &port);
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_HOSTKEY, ZSSHD_HOSTKEY);
+  /* Prefer hardware-accelerated AES-GCM (PS5 CPU has AES-NI) for transfer
+   * throughput, then AES-CTR, then software chacha20-poly1305. */
+  {
+    const char *ciphers = "aes256-gcm@openssh.com,aes128-gcm@openssh.com,"
+                          "aes256-ctr,aes128-ctr,"
+                          "chacha20-poly1305@openssh.com";
+    ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_CIPHERS_C_S, ciphers);
+    ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_CIPHERS_S_C, ciphers);
+  }
 
   if (ssh_bind_listen(g_bind) != SSH_OK) {
     printf("[zsshd] bind/listen failed: %s\n", ssh_get_error(g_bind));
