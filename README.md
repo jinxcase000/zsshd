@@ -164,6 +164,11 @@ See [`CHANGELOG.md`](CHANGELOG.md). The version is defined once in
 `include/zsshd_version.h` and shown in both the startup toast and the shell
 banner.
 
+## Roadmap
+
+Planned work — the `less`-style pager, tab-completion upgrades, and the path
+toward a fuller shell — lives in [`ROADMAP.md`](ROADMAP.md).
+
 ## License
 
 zsshd is MIT (see [`LICENSE.zftpd`](LICENSE.zftpd), inherited from the upstream
