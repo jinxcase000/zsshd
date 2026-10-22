@@ -46,6 +46,8 @@ struct session_state {
   int exec_requested;
   char exec_cmd[2048];
   int sftp_requested;
+  int pty_rows;
+  int pty_cols;
   sftp_session sftp;
   struct ssh_channel_callbacks_struct sftp_data_cb;
   ssh_channel channel;
@@ -172,12 +174,12 @@ static int pty_request_cb(ssh_session session, ssh_channel channel,
   (void)session;
   (void)channel;
   (void)term;
-  (void)cols;
-  (void)rows;
   (void)px;
   (void)py;
   struct session_state *st = (struct session_state *)userdata;
   st->pty_requested = 1;
+  st->pty_cols = cols;
+  st->pty_rows = rows;
   return 0; /* accept the pty */
 }
 
@@ -310,7 +312,7 @@ static void *handle_session(void *arg) {
         status = shell_exec(st.channel, st.exec_cmd);
       } else if (st.channel_wanted_shell) {
         /* interactive iff a PTY was requested; otherwise scripted stdin */
-        shell_run(st.channel, st.pty_requested);
+        shell_run(st.channel, st.pty_requested, st.pty_rows);
       }
       ssh_channel_request_send_exit_status(st.channel, status);
       ssh_channel_send_eof(st.channel);
