@@ -3,6 +3,14 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.5.1] - 2026-10-22
+### Fixed
+- Link the vendored libssh/mbedTLS static archives by explicit path instead of
+  `-L`/`-lssh`. The ps5-payload-sdk ships its own OpenSSL-built `libssh.a` on the
+  default search path, which `-lssh` could pick up instead of our mbedTLS build,
+  causing undefined-symbol link errors (`BN_new`, `EVP_PKEY_*`) in clean
+  environments such as CI.
+
 ## [0.5.0] - 2026-10-22
 ### Added
 - Tab completion in the interactive shell: command names in command position,

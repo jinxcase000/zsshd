@@ -26,15 +26,22 @@ CFLAGS += -Iinclude
 CFLAGS += -Iinclude/platform
 CFLAGS += -I$(PREFIX)/include
 
-LDFLAGS := -L$(PREFIX)/lib
-# Link order matters: libssh depends on the mbedtls trio, which in turn
-# pulls in the Everest/p256-m ECC backends.
-LDLIBS := -lssh -lmbedtls -lmbedx509 -lmbedcrypto -leverest -lp256m
+# Link the vendored static archives by EXPLICIT PATH, not via -L/-lssh. The
+# ps5-payload-sdk ships its own OpenSSL-built libssh.a on the default library
+# search path, and -lssh would pick that up (undefined OpenSSL symbols like
+# BN_new / EVP_PKEY_*) instead of our mbedTLS-built one. Order matters: libssh
+# depends on the mbedtls trio, which pulls in the Everest/p256-m ECC backends.
+LIBS := $(PREFIX)/lib/libssh.a \
+	$(PREFIX)/lib/libmbedtls.a \
+	$(PREFIX)/lib/libmbedx509.a \
+	$(PREFIX)/lib/libmbedcrypto.a \
+	$(PREFIX)/lib/libeverest.a \
+	$(PREFIX)/lib/libp256m.a
 
 all: $(ELF)
 
 $(ELF): $(SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
 
 clean:
 	rm -f $(ELF)
