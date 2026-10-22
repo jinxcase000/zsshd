@@ -1,0 +1,105 @@
+name: release
+
+# Build the PS5 payload and attach it (plus SHA256SUMS.txt) to a GitHub Release.
+# Fires automatically when a v* tag is pushed; can also be run manually.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.5.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          submodules: recursive
+
+      - name: Install PS5 payload SDK (PacBrew bundle)
+        run: |
+          set -eux
+          root="$RUNNER_TEMP/ps5-sdk"
+          mkdir -p "$root"
+          curl -fL -o "$RUNNER_TEMP/ps5-sdk.tar.gz" \
+            https://github.com/ps5-payload-dev/pacbrew-repo/releases/download/v0.40.2/ps5-payload-dev.tar.gz
+          tar -C "$root" -xzf "$RUNNER_TEMP/ps5-sdk.tar.gz"
+          echo "PS5_PAYLOAD_SDK=$root/opt/ps5-payload-sdk" >> "$GITHUB_ENV"
+
+      - name: Verify toolchain
+        run: |
+          test -f "$PS5_PAYLOAD_SDK/toolchain/prospero.mk"
+          test -x "$PS5_PAYLOAD_SDK/bin/prospero-clang"
+
+      - name: Enable Mbed-TLS threading
+        run: |
+          sed -i 's|^//#define MBEDTLS_THREADING_C$|#define MBEDTLS_THREADING_C|; s|^//#define MBEDTLS_THREADING_PTHREAD$|#define MBEDTLS_THREADING_PTHREAD|' \
+            external/mbedtls/include/mbedtls/mbedtls_config.h
+
+      - name: Build Mbed-TLS
+        run: |
+          set -eux
+          P="$PWD/external/prefix"
+          "$PS5_PAYLOAD_SDK/bin/prospero-cmake" -S external/mbedtls -B build/mbedtls \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" \
+            -DUSE_SHARED_MBEDTLS_LIBRARY=OFF -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+            -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF -DGEN_FILES=OFF
+          cmake --build build/mbedtls -j"$(nproc)"
+          cmake --install build/mbedtls
+
+      - name: Build libssh
+        run: |
+          set -eux
+          P="$PWD/external/prefix"
+          "$PS5_PAYLOAD_SDK/bin/prospero-cmake" -S external/libssh-0.12.2 -B build/libssh-0.12 \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" \
+            -DBUILD_SHARED_LIBS=OFF -DWITH_MBEDTLS=ON \
+            -DMBEDTLS_INCLUDE_DIR="$P/include" \
+            -DMBEDTLS_SSL_LIBRARY="$P/lib/libmbedtls.a" \
+            -DMBEDTLS_CRYPTO_LIBRARY="$P/lib/libmbedcrypto.a" \
+            -DMBEDTLS_X509_LIBRARY="$P/lib/libmbedx509.a" \
+            -DWITH_SERVER=ON -DWITH_SFTP=ON -DWITH_GSSAPI=OFF -DWITH_ZLIB=OFF \
+            -DWITH_NACL=OFF -DWITH_PCAP=OFF -DWITH_EXEC=OFF -DWITH_EXAMPLES=OFF \
+            -DUNIT_TESTING=OFF -DWITH_SYMBOL_VERSIONING=OFF -DWITH_DEBUG_CALLTRACE=OFF
+          cmake --build build/libssh-0.12 -j"$(nproc)"
+          cmake --install build/libssh-0.12
+
+      - name: Build payload
+        run: make
+
+      - name: Package assets
+        run: |
+          set -eux
+          tag="${{ steps.tag.outputs.tag }}"
+          mkdir -p dist
+          cp zsshd.elf "dist/zsshd-ps5-${tag}.elf"
+          ( cd dist && sha256sum "zsshd-ps5-${tag}.elf" > SHA256SUMS.txt )
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="${{ steps.tag.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "zsshd $tag" --generate-notes
+          fi

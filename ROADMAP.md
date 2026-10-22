@@ -24,6 +24,16 @@ The current pager is forward-only. A full pager adds:
 Scope note: interactive-only. Scripted/piped sessions keep the `cat` fallback
 so automation output stays clean.
 
+## Interactive polish (optional, nice-to-have)
+
+- **fish-style selectable completion.** Replace the flat candidate list with a
+  navigable grid drawn below the prompt: multi-column layout sized to the PTY
+  width (`pty_cols`, already captured), a reverse-video highlight, Tab /
+  Shift-Tab / arrows to move, Enter to accept, Esc to cancel, with a live
+  preview inserted into the line. Modal sub-loop with careful cursor math to
+  draw/erase the grid region. Interactive-only; comparable effort to the full
+  `less`-style pager. The current readline-style completion stays the default.
+
 ## Toward a Linux-grade shell
 
 Roughly in priority order:
