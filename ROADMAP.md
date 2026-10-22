@@ -31,13 +31,12 @@ Roughly in priority order:
 1. **Window-resize handling.** Honour the SSH `window-change` request so the
    pager and prompt track terminal size after a resize (today we only capture
    the size at PTY-request time).
-2. **Tab completion** for paths (and command names) in the line editor.
-3. **Quoting in the tokenizer.** Handle `"..."`, `'...'` and `\` escapes so
+2. **Quoting in the tokenizer.** Handle `"..."`, `'...'` and `\` escapes so
    paths with spaces work; today arguments split on raw whitespace.
-4. **Globbing:** expand `*` and `?` against the filesystem before dispatch.
-5. **Redirection & pipes:** `>`, `>>`, `<`, and `|` between built-ins.
-6. **Environment variables:** `export`, `$VAR` expansion, a `env`/`set` builtin.
-7. **More built-ins:** `wc`, `find`, `which`, `chmod`, `chown`, `ln`, `df`,
+3. **Globbing:** expand `*` and `?` against the filesystem before dispatch.
+4. **Redirection & pipes:** `>`, `>>`, `<`, and `|` between built-ins.
+5. **Environment variables:** `export`, `$VAR` expansion, a `env`/`set` builtin.
+6. **More built-ins:** `wc`, `find`, `which`, `chmod`, `chown`, `ln`, `df`,
    `du`, `date`, `sleep`, `ps`, `kill`.
 
 ## Transfer
