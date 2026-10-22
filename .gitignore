@@ -1,5 +1,12 @@
 # compiled payload(s)
 *.elf
 
-# top-level CMake build tree (regenerated from external/ sources)
+# CMake build trees (regenerated from the dependency sources)
 /build/
+/external/build/
+
+# built dependency prefix (regenerated: build mbedtls + libssh)
+/external/prefix/
+
+# dependency source tarballs
+/external/*.tar.xz
