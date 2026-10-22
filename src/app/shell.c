@@ -38,6 +38,7 @@ struct shell_ctx {
   char cwd[PATH_MAX];
   char host[64];
   int running;
+  int color;
   char (*history)[HIST_LINE];
   int hist_count;
   int hist_pos;
@@ -70,6 +71,13 @@ static void craw(struct shell_ctx *ctx, const char *s) {
   ssh_channel_write(ctx->channel, s, (uint32_t)strlen(s));
 }
 
+/* write a colour escape only when colour output is enabled (off for scripts) */
+static void ccolor(struct shell_ctx *ctx, const char *code) {
+  if (ctx->color) {
+    ssh_channel_write(ctx->channel, code, (uint32_t)strlen(code));
+  }
+}
+
 static void cprintf(struct shell_ctx *ctx, const char *fmt, ...) {
   char buf[2048];
   va_list ap;
@@ -87,9 +95,9 @@ static void cerror(struct shell_ctx *ctx, const char *fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  craw(ctx, C_ERR);
+  ccolor(ctx, C_ERR);
   cputs(ctx, buf);
-  craw(ctx, C_RESET);
+  ccolor(ctx, C_RESET);
 }
 
 /* --- path handling ----------------------------------------------------- */
@@ -296,13 +304,13 @@ static int cmd_ls(int argc, char **argv, struct shell_ctx *ctx) {
     craw(ctx, " ");
 
     if (isdir) {
-      craw(ctx, C_DIR);
+      ccolor(ctx, C_DIR);
     } else if (isexec) {
-      craw(ctx, C_USER);
+      ccolor(ctx, C_USER);
     }
     craw(ctx, ptrs[i]);
     if (isdir || isexec) {
-      craw(ctx, C_RESET);
+      ccolor(ctx, C_RESET);
     }
     craw(ctx, "\r\n");
   }
@@ -903,9 +911,9 @@ static int cmd_grep(int argc, char **argv, struct shell_ctx *ctx) {
       }
       if (regexec(&re, line, 0, NULL, 0) == 0) {
         if (multiple) {
-          craw(ctx, C_PATH);
+          ccolor(ctx, C_PATH);
           craw(ctx, argv[a]);
-          craw(ctx, C_RESET);
+          ccolor(ctx, C_RESET);
           craw(ctx, ":");
         }
         cputs(ctx, line);
@@ -968,19 +976,73 @@ static int tokenize(char *line, char **argv, int max) {
   return argc;
 }
 
-static void dispatch(struct shell_ctx *ctx, char *line) {
+static int dispatch_one(struct shell_ctx *ctx, char *line) {
   char *argv[MAX_ARGS];
   int argc = tokenize(line, argv, MAX_ARGS);
   if (argc == 0) {
-    return;
+    return 0;
   }
   for (int i = 0; i < N_COMMANDS; i++) {
     if (strcmp(argv[0], COMMANDS[i].name) == 0) {
-      COMMANDS[i].fn(argc, argv, ctx);
-      return;
+      return COMMANDS[i].fn(argc, argv, ctx);
     }
   }
   cerror(ctx, "%s: command not found\n", argv[0]);
+  return 127;
+}
+
+/* Run one or more commands separated by ';' or newlines. Returns the exit
+ * status of the last command executed. */
+static int run_commands(struct shell_ctx *ctx, const char *text) {
+  char work[LINE_MAX_LEN];
+  snprintf(work, sizeof(work), "%s", text);
+  int status = 0;
+  char *seg = work;
+  for (char *p = work;; p++) {
+    if (*p == ';' || *p == '\n' || *p == '\0') {
+      char end = *p;
+      *p = '\0';
+      status = dispatch_one(ctx, seg);
+      if (end == '\0' || !ctx->running) {
+        break;
+      }
+      seg = p + 1;
+    }
+  }
+  return status;
+}
+
+/* Scripted/non-interactive session: no banner, prompt, echo or colour. Read
+ * lines from the client and execute them until EOF (the client closes stdin). */
+static void run_batch(struct shell_ctx *ctx) {
+  char line[LINE_MAX_LEN];
+  size_t len = 0;
+  char buf[512];
+  for (;;) {
+    int n = ssh_channel_read(ctx->channel, buf, sizeof(buf), 0);
+    if (n <= 0) {
+      break;
+    }
+    for (int i = 0; i < n && ctx->running; i++) {
+      char c = buf[i];
+      if (c == '\n' || c == '\r') {
+        line[len] = '\0';
+        if (len > 0) {
+          run_commands(ctx, line);
+        }
+        len = 0;
+      } else if (len + 1 < sizeof(line)) {
+        line[len++] = c;
+      }
+    }
+    if (!ctx->running) {
+      break;
+    }
+  }
+  if (ctx->running && len > 0) {
+    line[len] = '\0';
+    run_commands(ctx, line);
+  }
 }
 
 /* Erase the currently typed line on screen and replace it with `repl`,
@@ -1028,7 +1090,7 @@ static void prompt(struct shell_ctx *ctx) {
   craw(ctx, " \342\235\257 "); /* UTF-8 for fish's ❯ */
 }
 
-void shell_run(ssh_channel channel) {
+void shell_run(ssh_channel channel, int interactive) {
   struct shell_ctx ctx;
   ctx.channel = channel;
   ctx.running = 1;
@@ -1039,6 +1101,13 @@ void shell_run(ssh_channel channel) {
   ctx.history = malloc(sizeof(*ctx.history) * HIST_MAX);
   ctx.hist_count = 0;
   ctx.hist_pos = 0;
+  ctx.color = interactive;
+
+  if (!interactive) {
+    run_batch(&ctx);
+    free(ctx.history);
+    return;
+  }
 
   craw(&ctx, C_USER);
   cputs(&ctx, "zsshd " ZSSHD_VERSION);
@@ -1155,7 +1224,7 @@ void shell_run(ssh_channel channel) {
           }
           ctx.hist_pos = ctx.hist_count;
         }
-        dispatch(&ctx, line);
+        run_commands(&ctx, line);
         len = 0;
         pos = 0;
         if (ctx.running) {
@@ -1194,8 +1263,31 @@ void shell_run(ssh_channel channel) {
   free(ctx.history);
 }
 
+int shell_exec(ssh_channel channel, const char *command) {
+  struct shell_ctx ctx;
+  ctx.channel = channel;
+  ctx.running = 1;
+  ctx.color = 0; /* scripted: clean, uncoloured output */
+  snprintf(ctx.cwd, sizeof(ctx.cwd), "/");
+  if (gethostname(ctx.host, sizeof(ctx.host)) != 0 || ctx.host[0] == '\0') {
+    snprintf(ctx.host, sizeof(ctx.host), "ps5");
+  }
+  ctx.history = NULL; /* no history for a one-shot exec */
+  ctx.hist_count = 0;
+  ctx.hist_pos = 0;
+  return run_commands(&ctx, command ? command : "");
+}
+
 #else /* !PLATFORM_PS5 */
 
-void shell_run(ssh_channel channel) { (void)channel; }
+void shell_run(ssh_channel channel, int interactive) {
+  (void)channel;
+  (void)interactive;
+}
+int shell_exec(ssh_channel channel, const char *command) {
+  (void)channel;
+  (void)command;
+  return 0;
+}
 
 #endif
