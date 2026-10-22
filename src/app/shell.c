@@ -1157,6 +1157,169 @@ static void prompt(struct shell_ctx *ctx) {
   craw(ctx, " \342\235\257 "); /* UTF-8 for fish's ❯ */
 }
 
+/* Insert a string at the cursor (used by tab completion). */
+static void shell_insert_str(struct shell_ctx *ctx, char *line, size_t *len,
+                             size_t *pos, const char *str) {
+  size_t slen = strlen(str);
+  if (slen == 0) {
+    return;
+  }
+  if (*len + slen >= LINE_MAX_LEN) {
+    slen = LINE_MAX_LEN - 1 - *len;
+  }
+  if (slen == 0) {
+    return;
+  }
+  memmove(line + *pos + slen, line + *pos, *len - *pos);
+  memcpy(line + *pos, str, slen);
+  *len += slen;
+  ssh_channel_write(ctx->channel, line + *pos, (uint32_t)(*len - *pos));
+  *pos += slen;
+  for (size_t k = 0; k < *len - *pos; k++) {
+    craw(ctx, "\b");
+  }
+}
+
+/* Reprint the prompt + current line and park the cursor at pos (used after
+ * listing completion candidates on their own line). */
+static void reprint_line(struct shell_ctx *ctx, const char *line, size_t len,
+                         size_t pos) {
+  prompt(ctx);
+  if (len) {
+    ssh_channel_write(ctx->channel, line, (uint32_t)len);
+  }
+  for (size_t k = 0; k < len - pos; k++) {
+    craw(ctx, "\b");
+  }
+}
+
+/* Tab completion: completes the token ending at the cursor. Command names in
+ * command position, filesystem paths elsewhere. */
+static void handle_tab(struct shell_ctx *ctx, char *line, size_t *len,
+                       size_t *pos) {
+  size_t tstart = *pos;
+  while (tstart > 0 && line[tstart - 1] != ' ' && line[tstart - 1] != '\t') {
+    tstart--;
+  }
+  size_t plen = *pos - tstart;
+  char partial[PATH_MAX];
+  if (plen >= sizeof(partial)) {
+    return;
+  }
+  memcpy(partial, line + tstart, plen);
+  partial[plen] = '\0';
+
+  int cmdpos = 1;
+  for (size_t i = 0; i < tstart; i++) {
+    if (line[i] != ' ' && line[i] != '\t') {
+      cmdpos = 0;
+      break;
+    }
+  }
+
+  enum { MAXM = 256 };
+  char (*names)[256] = malloc(sizeof(*names) * MAXM);
+  if (!names) {
+    return;
+  }
+  int count = 0;
+  const char *base = partial;
+
+  if (cmdpos && strchr(partial, '/') == NULL) {
+    for (int i = 0; i < N_COMMANDS && count < MAXM; i++) {
+      if (strncmp(COMMANDS[i].name, partial, plen) == 0) {
+        snprintf(names[count], 256, "%s", COMMANDS[i].name);
+        count++;
+      }
+    }
+  } else {
+    char dirbuf[PATH_MAX];
+    char resolved[PATH_MAX];
+    const char *slash = strrchr(partial, '/');
+    if (slash) {
+      size_t dl = (size_t)(slash - partial) + 1; /* keep the slash */
+      if (dl >= sizeof(dirbuf)) {
+        free(names);
+        return;
+      }
+      memcpy(dirbuf, partial, dl);
+      dirbuf[dl] = '\0';
+      base = slash + 1;
+      resolve_path(ctx, dirbuf, resolved, sizeof(resolved));
+    } else {
+      resolve_path(ctx, "", resolved, sizeof(resolved)); /* cwd */
+    }
+    size_t bl = strlen(base);
+    DIR *d = opendir(resolved);
+    if (d) {
+      struct dirent *e;
+      while ((e = readdir(d)) != NULL && count < MAXM) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
+          continue;
+        }
+        if (strncmp(e->d_name, base, bl) == 0) {
+          snprintf(names[count], 256, "%s", e->d_name);
+          count++;
+        }
+      }
+      closedir(d);
+    }
+  }
+
+  if (count == 0) {
+    craw(ctx, "\a"); /* bell */
+    free(names);
+    return;
+  }
+
+  char lcp[256];
+  snprintf(lcp, sizeof(lcp), "%s", names[0]);
+  for (int i = 1; i < count; i++) {
+    size_t j = 0;
+    while (lcp[j] && names[i][j] && lcp[j] == names[i][j]) {
+      j++;
+    }
+    lcp[j] = '\0';
+  }
+
+  size_t blen = strlen(base);
+  if (strlen(lcp) > blen) {
+    shell_insert_str(ctx, line, len, pos, lcp + blen);
+  }
+
+  if (count == 1) {
+    int isdir = 0;
+    if (!(cmdpos && strchr(partial, '/') == NULL)) {
+      size_t ts = *pos;
+      while (ts > 0 && line[ts - 1] != ' ' && line[ts - 1] != '\t') {
+        ts--;
+      }
+      size_t tl = *pos - ts;
+      char full[PATH_MAX], chk[PATH_MAX];
+      if (tl < sizeof(full)) {
+        memcpy(full, line + ts, tl);
+        full[tl] = '\0';
+        resolve_path(ctx, full, chk, sizeof(chk));
+        struct stat sb;
+        if (stat(chk, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+          isdir = 1;
+        }
+      }
+    }
+    shell_insert_str(ctx, line, len, pos, isdir ? "/" : " ");
+  } else if (strlen(lcp) == blen) {
+    /* ambiguous and no progress: list the candidates */
+    craw(ctx, "\r\n");
+    for (int i = 0; i < count; i++) {
+      cputs(ctx, names[i]);
+      craw(ctx, "  ");
+    }
+    craw(ctx, "\r\n");
+    reprint_line(ctx, line, *len, *pos);
+  }
+  free(names);
+}
+
 void shell_run(ssh_channel channel, int interactive, int rows) {
   struct shell_ctx ctx;
   ctx.channel = channel;
@@ -1315,6 +1478,8 @@ void shell_run(ssh_channel channel, int interactive, int rows) {
           ctx.hist_pos = ctx.hist_count;
         }
         prompt(&ctx);
+      } else if (c == '\t') {
+        handle_tab(&ctx, line, &len, &pos);
       } else if (c >= 0x20 && c != 0x7f && len + 1 < sizeof(line)) {
         /* insert at cursor */
         memmove(line + pos + 1, line + pos, len - pos);

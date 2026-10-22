@@ -3,6 +3,13 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.5.0] - 2026-10-22
+### Added
+- Tab completion in the interactive shell: command names in command position,
+  filesystem paths elsewhere. Single match completes (adding `/` for a
+  directory, space otherwise); multiple matches complete the common prefix and
+  list the options.
+
 ## [0.4.0] - 2026-10-22
 ### Added
 - `more`-style pager: `less` and `more` paginate output in an interactive
