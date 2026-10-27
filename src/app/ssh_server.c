@@ -15,6 +15,7 @@
 #include "firstrun.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -332,17 +333,33 @@ done:
 
 /* --- host key --------------------------------------------------------- */
 
+/* The host private key must be readable by its owner only. Older builds let
+ * libssh's fopen() create it, which left it 0666 on the console; such a key
+ * is tightened to 0600 on every start. */
 static int ensure_hostkey(void) {
   (void)mkdir(ZSSHD_DIR, 0700);
   if (access(ZSSHD_HOSTKEY, F_OK) == 0) {
+    if (chmod(ZSSHD_HOSTKEY, 0600) != 0) {
+      printf("[zsshd] chmod 0600 %s failed: %s\n", ZSSHD_HOSTKEY,
+             strerror(errno));
+    }
     return 0;
   }
+  /* Create the file 0600 first: libssh then writes it with fopen("wb"),
+   * which truncates and keeps the mode, so the key is never world-readable. */
+  int fd = open(ZSSHD_HOSTKEY, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) {
+    return -1;
+  }
+  (void)fchmod(fd, 0600);
+  close(fd);
   ssh_key key = NULL;
   /* RSA, not ed25519: the mbedtls crypto backend is unreliable for ed25519.
    * libssh 0.12 replaced ssh_pki_generate(type, bits, ...) with a PKI context
    * that carries the RSA size. */
   ssh_pki_ctx pki = ssh_pki_ctx_new();
   if (pki == NULL) {
+    unlink(ZSSHD_HOSTKEY);
     return -1;
   }
   int bits = 2048;
@@ -350,11 +367,16 @@ static int ensure_hostkey(void) {
   int grc = ssh_pki_generate_key(SSH_KEYTYPE_RSA, pki, &key);
   ssh_pki_ctx_free(pki);
   if (grc != SSH_OK) {
+    unlink(ZSSHD_HOSTKEY);
     return -1;
   }
   int rc = ssh_pki_export_privkey_file(key, NULL, NULL, NULL, ZSSHD_HOSTKEY);
   ssh_key_free(key);
-  return (rc == SSH_OK) ? 0 : -1;
+  if (rc != SSH_OK) {
+    unlink(ZSSHD_HOSTKEY); /* an empty file would skip generation next start */
+    return -1;
+  }
+  return 0;
 }
 
 /* --- public entry points --------------------------------------------- */
