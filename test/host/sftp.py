@@ -7,6 +7,8 @@ Against a host build of ssh_server.c linked to the vendored libssh, checks:
     flight (like `sftp -R 1`), and a pipelined put of <workdir>/src.bin, every
     copy sha256-checked. paramiko closes the channel before the server does,
     so each session end runs the client-closed-first path.
+  - a 1 MB SSH_FXP_READ is answered short (261120 bytes, matching the file)
+    and the session stays usable.
 Prints one line per check and exits non-zero on the first failure. Rates are
 printed for reference only: loopback has no real round trip, so they say
 nothing about the console.
@@ -17,6 +19,8 @@ import sys
 import time
 
 import paramiko
+from paramiko.sftp import CMD_DATA, CMD_READ
+from paramiko.sftp_file import int64
 
 port, keyf, work = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 src = os.path.join(work, "src.bin")
@@ -75,3 +79,13 @@ for r in range(3):
     t.close()
     time.sleep(0.5)  # let the server finish its side of the close
 
+t, s = connect()
+f = s.open(src, "rb")
+tp, msg = s._request(CMD_READ, f.handle, int64(0), 1048576)
+data = msg.get_string() if tp == CMD_DATA else b""
+with open(src, "rb") as fh:
+    head = fh.read(len(data))
+check(len(data) == 261120 and data == head,
+      f"1 MB read answered short: {len(data)} bytes, content matches")
+check(s.stat(src).st_size == size, "session still usable after the oversized read")
+t.close()

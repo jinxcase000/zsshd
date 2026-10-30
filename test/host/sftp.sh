@@ -45,5 +45,5 @@ sleep 1
 if ! kill -0 "$(cat "$W/pid")" 2>/dev/null; then
   echo "FAIL server process exited"; rc=1
 fi
-[ "$rc" = 0 ] && echo "PASS: 3 SFTP sessions verified, client closing first, server alive"
+[ "$rc" = 0 ] && echo "PASS: 3 SFTP sessions verified, oversized read answered short, server alive"
 exit "$rc"

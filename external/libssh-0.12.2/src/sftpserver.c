@@ -148,12 +148,15 @@ sftp_make_client_message(sftp_session sftp, sftp_packet packet)
             if (rc != SSH_OK) {
                 goto error;
             }
+            /* zsshd: clamp an oversized read and answer short, as
+             * OpenSSH's sftp-server.c does (SFTP_MAX_READ_LENGTH), instead
+             * of ending the session with SSH_FATAL. A short read is valid
+             * SFTP; the client asks again for the rest. */
             if (msg->len > MAX_PACKET_LEN - 1024) {
-                ssh_set_error(sftp->session,
-                              SSH_FATAL,
-                              "Too large SSH_FXP_READ length: %" PRIu32,
-                              msg->len);
-                goto error;
+                SSH_LOG(SSH_LOG_PACKET,
+                        "SSH_FXP_READ length %" PRIu32 " clamped to %d",
+                        msg->len, MAX_PACKET_LEN - 1024);
+                msg->len = MAX_PACKET_LEN - 1024;
             }
             break;
         case SSH_FXP_WRITE:
