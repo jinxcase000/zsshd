@@ -34,7 +34,7 @@ python3 -m venv "$W/venv"
 "$W/venv/bin/pip" install -q paramiko
 ssh-keygen -q -t ed25519 -N '' -f "$W/key"
 cp "$W/key.pub" "$W/dir/authorized_keys"
-head -c 1048576 /dev/urandom > "$W/work/src.bin"
+head -c 104857600 /dev/urandom > "$W/work/src.bin"
 "$W/zsshd-host" > "$W/server.log" 2>&1 &
 echo $! > "$W/pid"
 sleep 2
