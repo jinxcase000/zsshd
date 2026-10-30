@@ -236,6 +236,20 @@ static ssh_channel channel_open_cb(ssh_session session, void *userdata) {
 
 /* --- per-connection handler ------------------------------------------- */
 
+/* After our channel close, give the client up to 2 s to answer with its own
+ * close and drop the connection. Disconnecting at once cuts the TCP stream
+ * before OpenSSH has read the exit status and sent its close, so it prints
+ * "Connection to <host> closed by remote host." and exits non-zero even for
+ * a good upload or exec. */
+static void wait_client_close(ssh_session session, ssh_event event) {
+  (void)ssh_blocking_flush(session, 1000); /* push our close out first */
+  for (int i = 0; i < 20 && ssh_is_connected(session); i++) {
+    if (ssh_event_dopoll(event, 100) == SSH_ERROR) {
+      return; /* the client closed the connection */
+    }
+  }
+}
+
 static void *handle_session(void *arg) {
   ssh_session session = (ssh_session)arg;
   struct session_state st;
@@ -299,12 +313,22 @@ static void *handle_session(void *arg) {
           break;
         }
       }
+      /* A subsystem ends with an exit status too (OpenSSH's sshd sends 0).
+       * Sent before sftp_free: that sends EOF, closes and frees the channel
+       * (at once if the client already closed it), so st.channel must not be
+       * used after it. */
+      if (ssh_channel_is_open(st.channel)) {
+        ssh_channel_request_send_exit_status(st.channel, 0);
+      }
       if (st.sftp) {
         sftp_free(st.sftp);
         st.sftp = NULL;
+      } else {
+        ssh_channel_send_eof(st.channel);
+        ssh_channel_close(st.channel);
       }
-      ssh_channel_send_eof(st.channel);
-      ssh_channel_close(st.channel);
+      st.channel = NULL;
+      wait_client_close(session, event);
     } else {
       int status = 0;
       if (st.exec_requested) {
@@ -317,6 +341,7 @@ static void *handle_session(void *arg) {
       ssh_channel_request_send_exit_status(st.channel, status);
       ssh_channel_send_eof(st.channel);
       ssh_channel_close(st.channel);
+      wait_client_close(session, event);
     }
   }
 
