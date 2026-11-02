@@ -3,6 +3,21 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.6.0] - 2026-11-01
+### Added
+- Runtime configuration via single-file settings under `/data/zsshd/` (same
+  convention as `password`/`authorized_keys`):
+  - `port` — SSH listen port (default 22; invalid/out-of-range values fall
+    back to the default).
+  - `bindaddr` — restrict the listener to one interface/IP (e.g. a LAN or
+    Tailscale address) instead of all interfaces. Recommended with
+    passwordless root.
+  - `loglevel` — libssh log verbosity, 0..4 (none..functions; default 0).
+- `ps` built-in: lists running processes (PID and name) via
+  `sysctl(KERN_PROC)`, for spotting hung daemons / running titles.
+- `kill` built-in: `kill [-s signal | -signal | -number] pid...`; signal by
+  name or number (default TERM). `kill -l` lists supported signals.
+
 ## [0.5.1] - 2026-10-22
 ### Fixed
 - Link the vendored libssh/mbedTLS static archives by explicit path instead of

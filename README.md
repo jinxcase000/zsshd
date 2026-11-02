@@ -18,7 +18,8 @@ other payloads/mods can automate against it.
 - Interactive shell: eza-style `ls`, fish-style colored prompt, command history
   (Up/Down), and in-line editing (Left/Right, Home/End, Delete).
 - Built-in commands: `ls cd pwd cat echo whoami uname clear help exit`,
-  `mkdir rmdir touch rm cp mv`, `head tail grep`, `less` (alias of `cat`).
+  `mkdir rmdir touch rm cp mv`, `head tail grep`, `less` (alias of `cat`),
+  `ps` and `kill`.
 - **Scripting / automation:**
   - `ssh root@ps5 'cmd1; cmd2'` runs the command(s) and returns their exit status.
   - Piping commands (no PTY) runs them line-by-line with clean, uncolored output.
@@ -110,6 +111,32 @@ create either file on the console (the presence of either disables passwordless
 - `/data/zsshd/password` — first line is the accepted password.
 - `/data/zsshd/authorized_keys` — OpenSSH `authorized_keys` format (one key per
   line; supports multiple keys).
+
+## Configuration
+
+Optional settings, each a single small file under `/data/zsshd/` (only the
+first line is read). Create a file to set it, delete it to restore the
+default — the same convention as the auth files above.
+
+| File | Meaning | Default |
+|------|---------|---------|
+| `port` | SSH listen port | `22` |
+| `bindaddr` | Listen on one interface/IP only (e.g. a LAN or Tailscale address) instead of all interfaces | all interfaces |
+| `loglevel` | libssh log verbosity, `0`–`4` (none → functions) | `0` |
+
+Set them from your client — zsshd's own shell has no `>` redirection yet —
+by copying the value up over scp (write it to a local file first):
+
+```fish
+printf '2222\n' > /tmp/val;      scp /tmp/val root@<ps5-ip>:/data/zsshd/port
+printf '100.x.y.z\n' > /tmp/val; scp /tmp/val root@<ps5-ip>:/data/zsshd/bindaddr   # e.g. this console's Tailscale IP
+printf '2\n' > /tmp/val;         scp /tmp/val root@<ps5-ip>:/data/zsshd/loglevel
+```
+
+Only the first line is read (a trailing newline is fine). `scp` prints a
+harmless `fsetstat: Operation unsupported` after upload; the file still lands.
+Invalid or out-of-range values fall back to the default, and changes take
+effect the next time the payload starts.
 
 ## Usage
 

@@ -47,7 +47,7 @@ Roughly in priority order:
 4. **Redirection & pipes:** `>`, `>>`, `<`, and `|` between built-ins.
 5. **Environment variables:** `export`, `$VAR` expansion, a `env`/`set` builtin.
 6. **More built-ins:** `wc`, `find`, `which`, `chmod`, `chown`, `ln`, `df`,
-   `du`, `date`, `sleep`, `ps`, `kill`.
+   `du`, `date`, `sleep`. (`ps` and `kill` landed in 0.6.0.)
 
 ## Transfer
 
