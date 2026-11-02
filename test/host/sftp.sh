@@ -35,9 +35,13 @@ cmake -S "$root/external/libssh-0.12.2" -B "$W/libssh" -DCMAKE_BUILD_TYPE=Releas
   -DWITH_ZLIB=OFF -DWITH_EXAMPLES=OFF -DUNIT_TESTING=OFF \
   -DWITH_SYMBOL_VERSIONING=OFF > "$W/build.log" 2>&1
 # libssh's configure links compile_commands.json into its source tree; it
-# would dangle once $W is gone.
+# would dangle once $W is gone. Restore the link if git tracks it, else drop it.
 link="$root/external/libssh-0.12.2/compile_commands.json"
-if [ -L "$link" ]; then rm -f "$link"; fi
+if git -C "$root" ls-files --error-unmatch "$link" >/dev/null 2>&1; then
+  git -C "$root" checkout -- "$link"
+elif [ -L "$link" ]; then
+  rm -f "$link"
+fi
 cmake --build "$W/libssh" -j4 >> "$W/build.log" 2>&1
 cmake --install "$W/libssh" --prefix "$W/prefix" >> "$W/build.log" 2>&1
 mkdir "$W/dir" "$W/work"
