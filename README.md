@@ -5,8 +5,8 @@ A minimal **SSH server payload for the PlayStation 5**, forked from
 SSH with a small set of built-in file commands, and a non-interactive mode so
 other payloads/mods can automate against it.
 
-> Homebrew for jailbroken consoles. Use on hardware you own. Passwordless root
-> over the network is the default — see **Authentication** before exposing it.
+> Homebrew for jailbroken consoles. Use on hardware you own. Logins are refused
+> until you set up a password or a public key — see **Authentication**.
 
 ## Features
 
@@ -115,9 +115,20 @@ re-shown at every launch until you set your own credential.
 
 To set your own, create either file on the console:
 
-- `/data/zsshd/password` — first line is the accepted password.
+- `/data/zsshd/password` — first line is the accepted password (an empty first
+  line accepts nothing).
 - `/data/zsshd/authorized_keys` — OpenSSH `authorized_keys` format (one key per
   line; supports multiple keys).
+
+If neither file exists (password login turned off with `passwordauth` below, so
+no password is generated, or the generated one could not be saved), **every
+login is refused**: there is no passwordless login, and the startup toast says
+`No login set up: all refused`. Both files are read
+on each login attempt, so adding one takes effect without restarting the
+payload.
+
+To allow public-key logins only, turn password login off with the
+`passwordauth` setting below; a `password` file is then ignored.
 
 ## Configuration
 
@@ -130,6 +141,7 @@ default — the same convention as the auth files above.
 | `port` | SSH listen port | `22` |
 | `bindaddr` | Listen on one interface/IP only (e.g. a LAN or Tailscale address) instead of all interfaces | all interfaces |
 | `loglevel` | libssh log verbosity, `0`–`4` (none → functions) | `0` |
+| `passwordauth` | `0` turns password login off (public-key only); `1` allows it | `1` |
 
 Set them straight from the console using shell redirection (0.7.0+), either in
 a zsshd session or via `ssh` exec from your client:
