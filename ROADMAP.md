@@ -44,7 +44,8 @@ Roughly in priority order:
 2. **Quoting in the tokenizer.** Handle `"..."`, `'...'` and `\` escapes so
    paths with spaces work; today arguments split on raw whitespace.
 3. **Globbing:** expand `*` and `?` against the filesystem before dispatch.
-4. **Redirection & pipes:** `>`, `>>`, `<`, and `|` between built-ins.
+4. **Redirection & pipes:** `<` and `|` between built-ins. (`>`/`>>` output
+   redirection shipped in 0.7.0; `<` and `|` still need stdin plumbing.)
 5. **Environment variables:** `export`, `$VAR` expansion, a `env`/`set` builtin.
 6. **More built-ins:** `wc`, `find`, `which`, `chmod`, `chown`, `ln`, `df`,
    `du`, `date`, `sleep`. (`ps` and `kill` landed in 0.6.0.)

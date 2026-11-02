@@ -45,6 +45,7 @@ struct shell_ctx {
   int color;
   int interactive;
   int rows;
+  int out_fd; /* >=0 => redirect command stdout to this fd */
   char (*history)[HIST_LINE];
   int hist_count;
   int hist_pos;
@@ -53,6 +54,11 @@ struct shell_ctx {
 /* --- output helpers: translate bare \n to \r\n for the client PTY ------ */
 
 static void cout(struct shell_ctx *ctx, const char *s, size_t len) {
+  if (ctx->out_fd >= 0) {
+    ssize_t wr = write(ctx->out_fd, s, len); /* file: raw, no CRLF xlate */
+    (void)wr;
+    return;
+  }
   size_t start = 0;
   for (size_t i = 0; i < len; i++) {
     if (s[i] == '\n') {
@@ -74,6 +80,11 @@ static void cputs(struct shell_ctx *ctx, const char *s) {
 
 /* raw write, no newline translation (for escape sequences) */
 static void craw(struct shell_ctx *ctx, const char *s) {
+  if (ctx->out_fd >= 0) {
+    ssize_t wr = write(ctx->out_fd, s, strlen(s));
+    (void)wr;
+    return;
+  }
   ssh_channel_write(ctx->channel, s, (uint32_t)strlen(s));
 }
 
@@ -101,9 +112,12 @@ static void cerror(struct shell_ctx *ctx, const char *fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
+  int saved = ctx->out_fd;
+  ctx->out_fd = -1; /* errors go to the terminal, not a redirect target */
   ccolor(ctx, C_ERR);
   cputs(ctx, buf);
   ccolor(ctx, C_RESET);
+  ctx->out_fd = saved;
 }
 
 /* --- path handling ----------------------------------------------------- */
@@ -951,8 +965,8 @@ static int cmd_pager(int argc, char **argv, struct shell_ctx *ctx) {
       rc = 1;
       continue;
     }
-    if (!ctx->interactive) {
-      /* no TTY: dump like cat */
+    if (!ctx->interactive || ctx->out_fd >= 0) {
+      /* no TTY (or redirected): dump like cat */
       char buf[4096];
       size_t n;
       while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
@@ -1183,19 +1197,92 @@ static int tokenize(char *line, char **argv, int max) {
   return argc;
 }
 
+/* Scan argv for a '>' / '>>' redirection token (either '>file' or '>' then a
+ * separate filename). On a match, fill in *path and *append, strip the operator
+ * its target from argv (adjusting *argc), and return 1. Returns 0 if none,
+ * -1 on a dangling operator with no filename. Only the first match is used. */
+static int parse_redirect(char **argv, int *argc, const char **path,
+                          int *append) {
+  for (int i = 0; i < *argc; i++) {
+    if (argv[i][0] != '>') {
+      continue;
+    }
+    int app = (argv[i][1] == '>');
+    const char *fname = argv[i] + (app ? 2 : 1);
+    int consumed = 1;
+    if (*fname == '\0') {
+      if (i + 1 >= *argc) {
+        return -1;
+      }
+      fname = argv[i + 1];
+      consumed = 2;
+    }
+    *path = fname;
+    *append = app;
+    int from = i + consumed, to = i;
+    while (from < *argc) {
+      argv[to++] = argv[from++];
+    }
+    *argc = to;
+    return 1;
+  }
+  return 0;
+}
+
 static int dispatch_one(struct shell_ctx *ctx, char *line) {
   char *argv[MAX_ARGS];
   int argc = tokenize(line, argv, MAX_ARGS);
   if (argc == 0) {
     return 0;
   }
+
+  const char *rpath = NULL;
+  int append = 0;
+  int rr = parse_redirect(argv, &argc, &rpath, &append);
+  if (rr < 0) {
+    cerror(ctx, "syntax error: expected filename after redirection\n");
+    return 1;
+  }
+  if (argc == 0) {
+    cerror(ctx, "syntax error: missing command before redirection\n");
+    return 1;
+  }
+
+  int redirected = 0, saved_color = ctx->color;
+  if (rr == 1) {
+    char path[PATH_MAX];
+    resolve_path(ctx, rpath, path, sizeof(path));
+    int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+    int fd = open(path, flags, 0644);
+    if (fd < 0) {
+      cerror(ctx, "cannot open ");
+      cprintf(ctx, "%s: %s\n", rpath, strerror(errno));
+      return 1;
+    }
+    ctx->out_fd = fd;
+    ctx->color = 0; /* no colour escapes in a file */
+    redirected = 1;
+  }
+
+  int status = 127, found = 0;
   for (int i = 0; i < N_COMMANDS; i++) {
     if (strcmp(argv[0], COMMANDS[i].name) == 0) {
-      return COMMANDS[i].fn(argc, argv, ctx);
+      status = COMMANDS[i].fn(argc, argv, ctx);
+      found = 1;
+      break;
     }
   }
-  cerror(ctx, "%s: command not found\n", argv[0]);
-  return 127;
+  if (!found) {
+    cerror(ctx, "%s: command not found\n", argv[0]);
+    status = 127;
+  }
+
+  if (redirected) {
+    close(ctx->out_fd);
+    ctx->out_fd = -1;
+    ctx->color = saved_color;
+  }
+  return status;
 }
 
 /* Run one or more commands separated by ';' or newlines. Returns the exit
@@ -1474,6 +1561,7 @@ void shell_run(ssh_channel channel, int interactive, int rows) {
   ctx.color = interactive;
   ctx.interactive = interactive;
   ctx.rows = rows;
+  ctx.out_fd = -1;
 
   if (!interactive) {
     run_batch(&ctx);
@@ -1644,6 +1732,7 @@ int shell_exec(ssh_channel channel, const char *command) {
   ctx.color = 0; /* scripted: clean, uncoloured output */
   ctx.interactive = 0;
   ctx.rows = 0;
+  ctx.out_fd = -1;
   snprintf(ctx.cwd, sizeof(ctx.cwd), "/");
   if (gethostname(ctx.host, sizeof(ctx.host)) != 0 || ctx.host[0] == '\0') {
     snprintf(ctx.host, sizeof(ctx.host), "ps5");

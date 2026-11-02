@@ -24,6 +24,7 @@ other payloads/mods can automate against it.
   - `ssh root@ps5 'cmd1; cmd2'` runs the command(s) and returns their exit status.
   - Piping commands (no PTY) runs them line-by-line with clean, uncolored output.
   - `;` and newlines separate multiple commands.
+  - Output redirection: `cmd > file` (truncate) and `cmd >> file` (append).
 - Single-instance control: a new copy asks a running one to stand down.
 - On-screen toast on startup showing the listening `IP:port`.
 
@@ -124,14 +125,16 @@ default — the same convention as the auth files above.
 | `bindaddr` | Listen on one interface/IP only (e.g. a LAN or Tailscale address) instead of all interfaces | all interfaces |
 | `loglevel` | libssh log verbosity, `0`–`4` (none → functions) | `0` |
 
-Set them from your client — zsshd's own shell has no `>` redirection yet —
-by copying the value up over scp (write it to a local file first):
+Set them straight from the console using shell redirection (0.7.0+), either in
+a zsshd session or via `ssh` exec from your client:
 
 ```fish
-printf '2222\n' > /tmp/val;      scp /tmp/val root@<ps5-ip>:/data/zsshd/port
-printf '100.x.y.z\n' > /tmp/val; scp /tmp/val root@<ps5-ip>:/data/zsshd/bindaddr   # e.g. this console's Tailscale IP
-printf '2\n' > /tmp/val;         scp /tmp/val root@<ps5-ip>:/data/zsshd/loglevel
+ssh -p 22 root@<ps5-ip> 'echo 2222 > /data/zsshd/port'
+ssh -p 22 root@<ps5-ip> 'echo 100.x.y.z > /data/zsshd/bindaddr'   # e.g. this console's Tailscale IP
+ssh -p 22 root@<ps5-ip> 'echo 2 > /data/zsshd/loglevel'
 ```
+
+(`scp` also works: `printf '2222\n' > /tmp/v; scp /tmp/v root@<ps5-ip>:/data/zsshd/port`.)
 
 Only the first line is read (a trailing newline is fine). `scp` prints a
 harmless `fsetstat: Operation unsupported` after upload; the file still lands.

@@ -3,6 +3,18 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.7.0] - 2026-11-01
+### Added
+- Output redirection in the shell: `cmd > file` (truncate) and `cmd >> file`
+  (append) send a command's output to a file instead of the terminal, in both
+  interactive and scripted/exec sessions. Errors still go to the terminal and
+  colour is disabled when writing to a file. Config files can now be set from
+  the console, e.g. `echo 2222 > /data/zsshd/port`.
+
+### Note
+- Input redirection (`<`) and pipes (`|`) are not included yet; both need
+  stdin handling in the built-ins and are planned for a later release.
+
 ## [0.6.0] - 2026-11-01
 ### Added
 - Runtime configuration via single-file settings under `/data/zsshd/` (same
