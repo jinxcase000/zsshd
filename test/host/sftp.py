@@ -9,6 +9,10 @@ Against a host build of ssh_server.c linked to the vendored libssh, checks:
     which is the order that crashed the server before the close-order fix.
   - a 1 MB SSH_FXP_READ is answered short (261120 bytes, matching the file)
     and the session stays usable.
+  - rename (plain rename onto an existing name refused, posix-rename replaces
+    it), fstat on an open handle, fsetstat (chmod and utime through the handle,
+    then stat), and hardlink@openssh.com (raw extended request). These all run,
+    then the script exits non-zero if any failed.
 Prints one line per check and exits non-zero on the first failure. Rates are
 printed for reference only: loopback has no real round trip, so they say
 nothing about the console.
@@ -19,7 +23,7 @@ import sys
 import time
 
 import paramiko
-from paramiko.sftp import CMD_DATA, CMD_READ
+from paramiko.sftp import CMD_DATA, CMD_EXTENDED, CMD_READ
 from paramiko.sftp_file import int64
 
 port, keyf, work = int(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -89,3 +93,110 @@ check(len(data) == 261120 and data == head,
       f"1 MB read answered short: {len(data)} bytes, content matches")
 check(s.stat(src).st_size == size, "session still usable after the oversized read")
 t.close()
+
+# --- rename, fstat, fsetstat, posix-rename, hardlink --------------------
+bad = []
+
+
+def soft(ok, what):
+    print(("ok   " if ok else "FAIL ") + what)
+    if not ok:
+        bad.append(what)
+
+
+def attempt(what, fn):
+    """Run fn() -> (ok, detail); an exception is a FAIL, not a crash."""
+    try:
+        ok, detail = fn()
+    except Exception as e:  # server refused or dropped the request
+        ok, detail = False, f"{type(e).__name__}: {e}"
+    soft(ok, f"{what}: {detail}")
+
+
+t, s = connect()
+ops = os.path.join(work, "ops")
+os.makedirs(ops, exist_ok=True)
+a, b, c = (os.path.join(ops, n) for n in ("a", "b", "c"))
+link = os.path.join(ops, "link")
+for pth in (a, b, c, link):
+    if os.path.lexists(pth):
+        os.remove(pth)
+
+
+def wr(path, data):
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def rd(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def t_rename():
+    wr(a, b"alpha")
+    s.rename(a, b)
+    return (not os.path.exists(a) and rd(b) == b"alpha"), "a -> b, old name gone, content kept"
+
+
+def t_rename_refused():
+    wr(a, b"new-a")
+    try:
+        s.rename(a, b)
+    except IOError:
+        refused = True
+    else:
+        refused = False
+    return (refused and rd(a) == b"new-a" and rd(b) == b"alpha"), \
+        "plain rename onto an existing name refused, both files untouched"
+
+
+def t_posix_rename():
+    s.posix_rename(a, b)
+    return (not os.path.exists(a) and rd(b) == b"new-a"), "posix-rename onto an existing name replaces it"
+
+
+def t_fstat():
+    data = os.urandom(12345)
+    f = s.open(c, "wb")
+    os.chmod(c, 0o644)  # the server creates it with the client's (absent) mode
+    f.write(data)
+    f.flush()
+    sz = f.stat().st_size
+    f.close()
+    return (sz == len(data) and rd(c) == data), f"fstat on open handle: size {sz} == {len(data)}"
+
+
+def t_fsetstat():
+    f = s.open(c, "rb")
+    f.chmod(0o600)
+    f.utime((1000000000, 1100000000))
+    f.close()
+    st = s.stat(c)
+    ho = os.stat(c)
+    ok = ((st.st_mode & 0o777) == 0o600 and (ho.st_mode & 0o777) == 0o600
+          and st.st_atime == 1000000000 and st.st_mtime == 1100000000
+          and int(ho.st_mtime) == 1100000000)
+    return ok, f"chmod 0600 + utime via handle, then stat: mode {st.st_mode & 0o777:o} mtime {st.st_mtime}"
+
+
+def t_hardlink():
+    tp, msg = s._request(CMD_EXTENDED, "hardlink@openssh.com", c, link)
+    code = msg.get_int()
+    ok = (code == 0 and rd(link) == rd(c) and os.stat(link).st_ino == os.stat(c).st_ino
+          and os.stat(c).st_nlink == 2)
+    return ok, f"hardlink@openssh.com status {code}, same content, same inode, nlink 2"
+
+
+attempt("rename", t_rename)
+attempt("rename refused", t_rename_refused)
+attempt("posix-rename", t_posix_rename)
+attempt("fstat", t_fstat)
+attempt("fsetstat", t_fsetstat)
+attempt("hardlink", t_hardlink)
+try:
+    t.close()
+except Exception:
+    pass
+if bad:
+    sys.exit(1)
