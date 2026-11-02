@@ -3,6 +3,19 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.8.0] - 2026-11-02
+### Added
+- Input redirection and pipes in the shell:
+  - `cmd < file` feeds a file as the command's stdin.
+  - `cmd1 | cmd2 | ...` pipes one built-in's output into the next (each
+    non-final stage is captured to a temp file under /data/zsshd and fed on).
+  - `cat`, `grep`, `head` and `tail` read stdin when given no file operand,
+    so `ps | grep zsshd`, `cat f | head -n 5`, `grep x < f`, etc. work.
+
+### Note
+- The `less`/`more` pager still requires a file argument; it is not yet
+  stdin-aware, so `... | less` does not paginate (use a file, or `| cat`).
+
 ## [0.7.0] - 2026-11-01
 ### Added
 - Output redirection in the shell: `cmd > file` (truncate) and `cmd >> file`

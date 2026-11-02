@@ -46,6 +46,8 @@ struct shell_ctx {
   int interactive;
   int rows;
   int out_fd; /* >=0 => redirect command stdout to this fd */
+  const char *in_buf; /* stdin source for < and pipes; NULL = none */
+  size_t in_len;
   char (*history)[HIST_LINE];
   int hist_count;
   int hist_pos;
@@ -339,10 +341,114 @@ static int cmd_ls(int argc, char **argv, struct shell_ctx *ctx) {
   return 0;
 }
 
+/* --- input streams (for '<' redirection and pipes) -------------------- */
+
+/* A read cursor over either a real file or an in-memory buffer (stdin). */
+struct instream {
+  FILE *fp;
+  const char *buf;
+  size_t len;
+  size_t pos;
+};
+
+static void in_from_file(struct instream *in, FILE *fp) {
+  in->fp = fp;
+  in->buf = NULL;
+  in->len = 0;
+  in->pos = 0;
+}
+
+static void in_from_buf(struct instream *in, const char *buf, size_t len) {
+  in->fp = NULL;
+  in->buf = buf;
+  in->len = len;
+  in->pos = 0;
+}
+
+/* fread-style block read. */
+static size_t in_read(struct instream *in, char *dst, size_t cap) {
+  if (in->fp) {
+    return fread(dst, 1, cap, in->fp);
+  }
+  size_t avail = in->len - in->pos;
+  size_t n = avail < cap ? avail : cap;
+  memcpy(dst, in->buf + in->pos, n);
+  in->pos += n;
+  return n;
+}
+
+/* fgets-style: one line incl. its trailing newline, NUL-terminated. Returns 1
+ * if a line was read, 0 at EOF. */
+static int in_gets(struct instream *in, char *dst, size_t cap) {
+  if (cap == 0) {
+    return 0;
+  }
+  if (in->fp) {
+    return fgets(dst, (int)cap, in->fp) != NULL;
+  }
+  if (in->pos >= in->len) {
+    return 0;
+  }
+  size_t i = 0;
+  while (i + 1 < cap && in->pos < in->len) {
+    char c = in->buf[in->pos++];
+    dst[i++] = c;
+    if (c == '\n') {
+      break;
+    }
+  }
+  dst[i] = '\0';
+  return 1;
+}
+
+/* Read a whole file into a malloc'd buffer (caller frees); NULL on error. */
+static char *read_file_all(const char *path, size_t *outlen) {
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    return NULL;
+  }
+  size_t cap = 8192, len = 0;
+  char *b = malloc(cap);
+  if (!b) {
+    fclose(f);
+    return NULL;
+  }
+  size_t n;
+  while ((n = fread(b + len, 1, cap - len, f)) > 0) {
+    len += n;
+    if (len == cap) {
+      size_t ncap = cap * 2;
+      char *nb = realloc(b, ncap);
+      if (!nb) {
+        free(b);
+        fclose(f);
+        return NULL;
+      }
+      b = nb;
+      cap = ncap;
+    }
+  }
+  fclose(f);
+  *outlen = len;
+  return b;
+}
+
+/* --- commands (continued) --------------------------------------------- */
+
 static int cmd_cat(int argc, char **argv, struct shell_ctx *ctx) {
+  char buf[4096];
+  size_t n;
   if (argc < 2) {
-    cerror(ctx, "cat: missing file operand\n");
-    return 1;
+    if (!ctx->in_buf) {
+      cerror(ctx, "cat: missing file operand\n");
+      return 1;
+    }
+    struct instream in;
+    in_from_buf(&in, ctx->in_buf, ctx->in_len);
+    while ((n = in_read(&in, buf, sizeof(buf))) > 0) {
+      cout(ctx, buf, n);
+    }
+    return 0;
   }
   int rc = 0;
   for (int a = 1; a < argc; a++) {
@@ -355,8 +461,6 @@ static int cmd_cat(int argc, char **argv, struct shell_ctx *ctx) {
       rc = 1;
       continue;
     }
-    char buf[4096];
-    size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
       cout(ctx, buf, n);
     }
@@ -795,12 +899,28 @@ static int head_tail_nlines(int argc, char **argv, int *start) {
   return nlines;
 }
 
+static void head_stream(struct shell_ctx *ctx, struct instream *in,
+                        int nlines) {
+  char line[4096];
+  int count = 0;
+  while (count < nlines && in_gets(in, line, sizeof(line))) {
+    cout(ctx, line, strlen(line));
+    count++;
+  }
+}
+
 static int cmd_head(int argc, char **argv, struct shell_ctx *ctx) {
   int start;
   int nlines = head_tail_nlines(argc, argv, &start);
   if (start >= argc) {
-    cerror(ctx, "head: missing file operand\n");
-    return 1;
+    if (!ctx->in_buf) {
+      cerror(ctx, "head: missing file operand\n");
+      return 1;
+    }
+    struct instream in;
+    in_from_buf(&in, ctx->in_buf, ctx->in_len);
+    head_stream(ctx, &in, nlines);
+    return 0;
   }
   int multiple = (argc - start) > 1, rc = 0;
   for (int a = start; a < argc; a++) {
@@ -816,12 +936,9 @@ static int cmd_head(int argc, char **argv, struct shell_ctx *ctx) {
     if (multiple) {
       cprintf(ctx, "==> %s <==\n", argv[a]);
     }
-    char line[4096];
-    int count = 0;
-    while (count < nlines && fgets(line, sizeof(line), f)) {
-      cout(ctx, line, strlen(line));
-      count++;
-    }
+    struct instream in;
+    in_from_file(&in, f);
+    head_stream(ctx, &in, nlines);
     fclose(f);
     if (multiple && a + 1 < argc) {
       cputs(ctx, "\n");
@@ -830,12 +947,51 @@ static int cmd_head(int argc, char **argv, struct shell_ctx *ctx) {
   return rc;
 }
 
+static void tail_stream(struct shell_ctx *ctx, struct instream *in,
+                        int nlines) {
+  if (nlines <= 0) {
+    return;
+  }
+  char **ring = calloc((size_t)nlines, sizeof(char *));
+  if (!ring) {
+    cerror(ctx, "tail: out of memory\n");
+    return;
+  }
+  char line[4096];
+  int idx = 0, filled = 0;
+  while (in_gets(in, line, sizeof(line))) {
+    free(ring[idx]);
+    ring[idx] = strdup(line);
+    idx = (idx + 1) % nlines;
+    if (filled < nlines) {
+      filled++;
+    }
+  }
+  int begin = (filled < nlines) ? 0 : idx;
+  for (int i = 0; i < filled; i++) {
+    char *ln = ring[(begin + i) % nlines];
+    if (ln) {
+      cout(ctx, ln, strlen(ln));
+    }
+  }
+  for (int i = 0; i < nlines; i++) {
+    free(ring[i]);
+  }
+  free(ring);
+}
+
 static int cmd_tail(int argc, char **argv, struct shell_ctx *ctx) {
   int start;
   int nlines = head_tail_nlines(argc, argv, &start);
   if (start >= argc) {
-    cerror(ctx, "tail: missing file operand\n");
-    return 1;
+    if (!ctx->in_buf) {
+      cerror(ctx, "tail: missing file operand\n");
+      return 1;
+    }
+    struct instream in;
+    in_from_buf(&in, ctx->in_buf, ctx->in_len);
+    tail_stream(ctx, &in, nlines);
+    return 0;
   }
   int multiple = (argc - start) > 1, rc = 0;
   for (int a = start; a < argc; a++) {
@@ -851,43 +1007,39 @@ static int cmd_tail(int argc, char **argv, struct shell_ctx *ctx) {
     if (multiple) {
       cprintf(ctx, "==> %s <==\n", argv[a]);
     }
-    if (nlines > 0) {
-      /* keep only the last N lines in a ring of heap strings */
-      char **ring = calloc((size_t)nlines, sizeof(char *));
-      if (!ring) {
-        fclose(f);
-        cerror(ctx, "tail: out of memory\n");
-        rc = 1;
-        continue;
-      }
-      char line[4096];
-      int idx = 0, filled = 0;
-      while (fgets(line, sizeof(line), f)) {
-        free(ring[idx]);
-        ring[idx] = strdup(line);
-        idx = (idx + 1) % nlines;
-        if (filled < nlines) {
-          filled++;
-        }
-      }
-      int begin = (filled < nlines) ? 0 : idx;
-      for (int i = 0; i < filled; i++) {
-        char *ln = ring[(begin + i) % nlines];
-        if (ln) {
-          cout(ctx, ln, strlen(ln));
-        }
-      }
-      for (int i = 0; i < nlines; i++) {
-        free(ring[i]);
-      }
-      free(ring);
-    }
+    struct instream in;
+    in_from_file(&in, f);
+    tail_stream(ctx, &in, nlines);
     fclose(f);
     if (multiple && a + 1 < argc) {
       cputs(ctx, "\n");
     }
   }
   return rc;
+}
+
+static int grep_stream(struct shell_ctx *ctx, const regex_t *re,
+                       struct instream *in, const char *label) {
+  char line[4096];
+  int matched = 0;
+  while (in_gets(in, line, sizeof(line))) {
+    size_t L = strlen(line);
+    if (L > 0 && line[L - 1] == '\n') {
+      line[L - 1] = '\0';
+    }
+    if (regexec(re, line, 0, NULL, 0) == 0) {
+      if (label) {
+        ccolor(ctx, C_PATH);
+        craw(ctx, label);
+        ccolor(ctx, C_RESET);
+        craw(ctx, ":");
+      }
+      cputs(ctx, line);
+      cputs(ctx, "\n");
+      matched = 1;
+    }
+  }
+  return matched;
 }
 
 static int cmd_grep(int argc, char **argv, struct shell_ctx *ctx) {
@@ -903,8 +1055,8 @@ static int cmd_grep(int argc, char **argv, struct shell_ctx *ctx) {
     }
     start++;
   }
-  if (argc - start < 2) {
-    cerror(ctx, "grep: usage: grep [-i] pattern file...\n");
+  if (start >= argc) {
+    cerror(ctx, "grep: usage: grep [-i] pattern [file...]\n");
     return 1;
   }
   const char *pat = argv[start++];
@@ -913,35 +1065,34 @@ static int cmd_grep(int argc, char **argv, struct shell_ctx *ctx) {
     cerror(ctx, "grep: invalid pattern\n");
     return 1;
   }
-  int multiple = (argc - start) > 1, matched = 0;
-  for (int a = start; a < argc; a++) {
-    char path[PATH_MAX];
-    resolve_path(ctx, argv[a], path, sizeof(path));
-    FILE *f = fopen(path, "r");
-    if (!f) {
-      cerror(ctx, "grep: ");
-      cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
-      continue;
+  int nfiles = argc - start, matched = 0;
+  if (nfiles == 0) {
+    if (!ctx->in_buf) {
+      regfree(&re);
+      cerror(ctx, "grep: no input\n");
+      return 1;
     }
-    char line[4096];
-    while (fgets(line, sizeof(line), f)) {
-      size_t L = strlen(line);
-      if (L > 0 && line[L - 1] == '\n') {
-        line[L - 1] = '\0';
+    struct instream in;
+    in_from_buf(&in, ctx->in_buf, ctx->in_len);
+    matched = grep_stream(ctx, &re, &in, NULL);
+  } else {
+    int multiple = nfiles > 1;
+    for (int a = start; a < argc; a++) {
+      char path[PATH_MAX];
+      resolve_path(ctx, argv[a], path, sizeof(path));
+      FILE *f = fopen(path, "r");
+      if (!f) {
+        cerror(ctx, "grep: ");
+        cprintf(ctx, "%s: %s\n", argv[a], strerror(errno));
+        continue;
       }
-      if (regexec(&re, line, 0, NULL, 0) == 0) {
-        if (multiple) {
-          ccolor(ctx, C_PATH);
-          craw(ctx, argv[a]);
-          ccolor(ctx, C_RESET);
-          craw(ctx, ":");
-        }
-        cputs(ctx, line);
-        cputs(ctx, "\n");
+      struct instream in;
+      in_from_file(&in, f);
+      if (grep_stream(ctx, &re, &in, multiple ? argv[a] : NULL)) {
         matched = 1;
       }
+      fclose(f);
     }
-    fclose(f);
   }
   regfree(&re);
   return matched ? 0 : 1;
@@ -1197,35 +1348,47 @@ static int tokenize(char *line, char **argv, int max) {
   return argc;
 }
 
-/* Scan argv for a '>' / '>>' redirection token (either '>file' or '>' then a
- * separate filename). On a match, fill in *path and *append, strip the operator
- * its target from argv (adjusting *argc), and return 1. Returns 0 if none,
- * -1 on a dangling operator with no filename. Only the first match is used. */
-static int parse_redirect(char **argv, int *argc, const char **path,
-                          int *append) {
+struct redir {
+  const char *out_path; /* non-NULL for > or >> */
+  int append;           /* 1 for >>, 0 for > */
+  const char *in_path;  /* non-NULL for < */
+};
+
+/* Strip '>' '>>' (output) and '<' (input) redirection tokens from argv,
+ * filling *r. Each operator may be glued to its filename ('>f') or separate
+ * ('>' 'f'). Returns 0 on success, -1 on an operator with no filename. */
+static int parse_redirect(char **argv, int *argc, struct redir *r) {
+  r->out_path = NULL;
+  r->append = 0;
+  r->in_path = NULL;
+  int w = 0;
   for (int i = 0; i < *argc; i++) {
-    if (argv[i][0] != '>') {
-      continue;
-    }
-    int app = (argv[i][1] == '>');
-    const char *fname = argv[i] + (app ? 2 : 1);
-    int consumed = 1;
-    if (*fname == '\0') {
-      if (i + 1 >= *argc) {
-        return -1;
+    char *t = argv[i];
+    if (t[0] == '>') {
+      int app = (t[1] == '>');
+      const char *fname = t + (app ? 2 : 1);
+      if (*fname == '\0') {
+        if (i + 1 >= *argc) {
+          return -1;
+        }
+        fname = argv[++i];
       }
-      fname = argv[i + 1];
-      consumed = 2;
+      r->out_path = fname;
+      r->append = app;
+    } else if (t[0] == '<') {
+      const char *fname = t + 1;
+      if (*fname == '\0') {
+        if (i + 1 >= *argc) {
+          return -1;
+        }
+        fname = argv[++i];
+      }
+      r->in_path = fname;
+    } else {
+      argv[w++] = t;
     }
-    *path = fname;
-    *append = app;
-    int from = i + consumed, to = i;
-    while (from < *argc) {
-      argv[to++] = argv[from++];
-    }
-    *argc = to;
-    return 1;
   }
+  *argc = w;
   return 0;
 }
 
@@ -1236,10 +1399,8 @@ static int dispatch_one(struct shell_ctx *ctx, char *line) {
     return 0;
   }
 
-  const char *rpath = NULL;
-  int append = 0;
-  int rr = parse_redirect(argv, &argc, &rpath, &append);
-  if (rr < 0) {
+  struct redir r;
+  if (parse_redirect(argv, &argc, &r) != 0) {
     cerror(ctx, "syntax error: expected filename after redirection\n");
     return 1;
   }
@@ -1248,20 +1409,43 @@ static int dispatch_one(struct shell_ctx *ctx, char *line) {
     return 1;
   }
 
-  int redirected = 0, saved_color = ctx->color;
-  if (rr == 1) {
+  const char *saved_in_buf = ctx->in_buf;
+  size_t saved_in_len = ctx->in_len;
+  char *in_data = NULL;
+  int redirected_out = 0, saved_color = ctx->color;
+
+  if (r.in_path) {
     char path[PATH_MAX];
-    resolve_path(ctx, rpath, path, sizeof(path));
-    int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+    resolve_path(ctx, r.in_path, path, sizeof(path));
+    size_t len = 0;
+    in_data = read_file_all(path, &len);
+    if (!in_data) {
+      cerror(ctx, "cannot open ");
+      cprintf(ctx, "%s: %s\n", r.in_path, strerror(errno));
+      return 1;
+    }
+    ctx->in_buf = in_data;
+    ctx->in_len = len;
+  }
+
+  if (r.out_path) {
+    char path[PATH_MAX];
+    resolve_path(ctx, r.out_path, path, sizeof(path));
+    int flags = O_WRONLY | O_CREAT | (r.append ? O_APPEND : O_TRUNC);
     int fd = open(path, flags, 0644);
     if (fd < 0) {
       cerror(ctx, "cannot open ");
-      cprintf(ctx, "%s: %s\n", rpath, strerror(errno));
+      cprintf(ctx, "%s: %s\n", r.out_path, strerror(errno));
+      if (in_data) {
+        free(in_data);
+        ctx->in_buf = saved_in_buf;
+        ctx->in_len = saved_in_len;
+      }
       return 1;
     }
     ctx->out_fd = fd;
     ctx->color = 0; /* no colour escapes in a file */
-    redirected = 1;
+    redirected_out = 1;
   }
 
   int status = 127, found = 0;
@@ -1277,16 +1461,84 @@ static int dispatch_one(struct shell_ctx *ctx, char *line) {
     status = 127;
   }
 
-  if (redirected) {
+  if (redirected_out) {
     close(ctx->out_fd);
     ctx->out_fd = -1;
     ctx->color = saved_color;
+  }
+  if (in_data) {
+    free(in_data);
+    ctx->in_buf = saved_in_buf;
+    ctx->in_len = saved_in_len;
   }
   return status;
 }
 
 /* Run one or more commands separated by ';' or newlines. Returns the exit
  * status of the last command executed. */
+/* Run a pipeline cmds[0] | cmds[1] | ... Each non-final stage's output is
+ * captured to a temp file and fed as the next stage's stdin; the final stage
+ * writes normally. Returns the last stage's exit status. */
+static int run_pipeline(struct shell_ctx *ctx, char **cmds, int n) {
+  const char *saved_in = ctx->in_buf;
+  size_t saved_inlen = ctx->in_len;
+  char *carry = NULL;
+  size_t carry_len = 0;
+  int status = 0;
+  for (int i = 0; i < n && ctx->running; i++) {
+    if (i > 0) {
+      ctx->in_buf = carry;
+      ctx->in_len = carry_len;
+    }
+    if (i < n - 1) {
+      char tmp[PATH_MAX];
+      snprintf(tmp, sizeof(tmp), "/data/zsshd/.pipe.%lx.%d",
+               (unsigned long)(uintptr_t)ctx, i);
+      char linebuf[LINE_MAX_LEN];
+      snprintf(linebuf, sizeof(linebuf), "%s > %s", cmds[i], tmp);
+      status = dispatch_one(ctx, linebuf);
+      free(carry);
+      carry = read_file_all(tmp, &carry_len);
+      (void)unlink(tmp);
+      if (!carry) {
+        carry = malloc(1);
+        carry_len = 0;
+      }
+    } else {
+      status = dispatch_one(ctx, cmds[i]);
+    }
+  }
+  free(carry);
+  ctx->in_buf = saved_in;
+  ctx->in_len = saved_inlen;
+  return status;
+}
+
+/* Split a command segment on top-level '|'; run it as a pipeline, or as a
+ * single command when there is no pipe. */
+static int run_segment(struct shell_ctx *ctx, char *seg) {
+  char *cmds[MAX_ARGS];
+  int n = 0;
+  char *start = seg;
+  for (char *p = seg;; p++) {
+    if (*p == '|' || *p == '\0') {
+      char end = *p;
+      *p = '\0';
+      if (n < MAX_ARGS) {
+        cmds[n++] = start;
+      }
+      if (end == '\0') {
+        break;
+      }
+      start = p + 1;
+    }
+  }
+  if (n <= 1) {
+    return dispatch_one(ctx, seg);
+  }
+  return run_pipeline(ctx, cmds, n);
+}
+
 static int run_commands(struct shell_ctx *ctx, const char *text) {
   char work[LINE_MAX_LEN];
   snprintf(work, sizeof(work), "%s", text);
@@ -1296,7 +1548,7 @@ static int run_commands(struct shell_ctx *ctx, const char *text) {
     if (*p == ';' || *p == '\n' || *p == '\0') {
       char end = *p;
       *p = '\0';
-      status = dispatch_one(ctx, seg);
+      status = run_segment(ctx, seg);
       if (end == '\0' || !ctx->running) {
         break;
       }
@@ -1562,6 +1814,8 @@ void shell_run(ssh_channel channel, int interactive, int rows) {
   ctx.interactive = interactive;
   ctx.rows = rows;
   ctx.out_fd = -1;
+  ctx.in_buf = NULL;
+  ctx.in_len = 0;
 
   if (!interactive) {
     run_batch(&ctx);
@@ -1733,6 +1987,8 @@ int shell_exec(ssh_channel channel, const char *command) {
   ctx.interactive = 0;
   ctx.rows = 0;
   ctx.out_fd = -1;
+  ctx.in_buf = NULL;
+  ctx.in_len = 0;
   snprintf(ctx.cwd, sizeof(ctx.cwd), "/");
   if (gethostname(ctx.host, sizeof(ctx.host)) != 0 || ctx.host[0] == '\0') {
     snprintf(ctx.host, sizeof(ctx.host), "ps5");

@@ -24,7 +24,8 @@ other payloads/mods can automate against it.
   - `ssh root@ps5 'cmd1; cmd2'` runs the command(s) and returns their exit status.
   - Piping commands (no PTY) runs them line-by-line with clean, uncolored output.
   - `;` and newlines separate multiple commands.
-  - Output redirection: `cmd > file` (truncate) and `cmd >> file` (append).
+  - Redirection: `cmd > file` (truncate), `cmd >> file` (append), `cmd < file` (stdin).
+  - Pipes: `cmd1 | cmd2` feeds one built-in's output into the next (e.g. `ps | grep ...`).
 - Single-instance control: a new copy asks a running one to stand down.
 - On-screen toast on startup showing the listening `IP:port`.
 
