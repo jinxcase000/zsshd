@@ -17,6 +17,7 @@ SRCS := \
 	src/app/zsshd_instance.c \
 	src/app/instance_control.c \
 	src/app/ssh_server.c \
+	src/app/zsshd_config.c \
 	src/app/shell.c \
 	src/platform/pal_notification.c
 

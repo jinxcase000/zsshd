@@ -11,6 +11,7 @@
 #include "shell.h"
 #include "pal_notification.h"
 #include "zsshd_version.h"
+#include "zsshd_config.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -398,7 +399,8 @@ int ssh_server_run(void) {
   if (!g_bind) {
     return -1;
   }
-  int port = ZSSHD_PORT;
+  /* Listen port: /data/zsshd/port overrides the compile-time default. */
+  int port = zsshd_config_int("port", ZSSHD_PORT, 1, 65535);
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_BINDPORT, &port);
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_HOSTKEY, ZSSHD_HOSTKEY);
   /* Prefer hardware-accelerated AES-GCM (PS5 CPU has AES-NI) for transfer
