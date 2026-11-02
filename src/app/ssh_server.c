@@ -402,6 +402,19 @@ int ssh_server_run(void) {
   /* Listen port: /data/zsshd/port overrides the compile-time default. */
   int port = zsshd_config_int("port", ZSSHD_PORT, 1, 65535);
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_BINDPORT, &port);
+  /* Optional bind address: /data/zsshd/bindaddr restricts the listener to
+   * one interface (e.g. a LAN or Tailscale IP) instead of all interfaces.
+   * Recommended when running passwordless root. Unset = listen on 0.0.0.0. */
+  char bindaddr[64];
+  if (zsshd_config_str("bindaddr", bindaddr, sizeof(bindaddr))) {
+    ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_BINDADDR, bindaddr);
+  }
+  /* libssh log verbosity: /data/zsshd/loglevel 0..4 (none..functions);
+   * default 0 (quiet). Raise for connection/auth debugging. */
+  {
+    int loglevel = zsshd_config_int("loglevel", 0, 0, 4);
+    ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_LOG_VERBOSITY, &loglevel);
+  }
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_HOSTKEY, ZSSHD_HOSTKEY);
   /* Prefer hardware-accelerated AES-GCM (PS5 CPU has AES-NI) for transfer
    * throughput, then AES-CTR, then software chacha20-poly1305. */
