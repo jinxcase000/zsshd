@@ -13,6 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <signal.h>
+#include <strings.h>
+#include <sys/sysctl.h>
+#include <sys/types.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -994,6 +998,141 @@ static int cmd_pager(int argc, char **argv, struct shell_ctx *ctx) {
   return rc;
 }
 
+/* --- process commands (ps / kill) ------------------------------------- */
+
+/* kinfo_proc field offsets for the console's process records, mirroring the
+ * layout instance_control.c already relies on (KINFO_PID_OFFSET /
+ * KINFO_THREAD_OFFSET). Raw offsets are used instead of struct kinfo_proc
+ * because the SDK header layout does not match the console's. */
+#define PROC_PID_OFFSET 72U
+#define PROC_NAME_OFFSET 447U
+#define PROC_NAME_SIZE 20U
+
+static int cmd_ps(int argc, char **argv, struct shell_ctx *ctx) {
+  (void)argc;
+  (void)argv;
+  int mib[4] = {1, 14, 8, 0}; /* CTL_KERN, KERN_PROC, KERN_PROC_PROC */
+  size_t size = 0;
+  if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || size == 0) {
+    cerror(ctx, "ps: cannot query process list\n");
+    return 1;
+  }
+  unsigned char *buf = malloc(size);
+  if (!buf) {
+    cerror(ctx, "ps: out of memory\n");
+    return 1;
+  }
+  if (sysctl(mib, 4, buf, &size, NULL, 0) != 0) {
+    free(buf);
+    cerror(ctx, "ps: cannot read process list\n");
+    return 1;
+  }
+  cprintf(ctx, "%6s  %s\n", "PID", "NAME");
+  for (size_t off = 0; off + PROC_NAME_OFFSET + PROC_NAME_SIZE <= size;) {
+    int rec = 0;
+    memcpy(&rec, buf + off, sizeof(rec));
+    if (rec <= 0 || off + (size_t)rec > size ||
+        (size_t)rec <= PROC_NAME_OFFSET + PROC_NAME_SIZE) {
+      break;
+    }
+    pid_t pid = -1;
+    memcpy(&pid, buf + off + PROC_PID_OFFSET, sizeof(pid));
+    char name[PROC_NAME_SIZE + 1];
+    memcpy(name, buf + off + PROC_NAME_OFFSET, PROC_NAME_SIZE);
+    name[PROC_NAME_SIZE] = '\0';
+    if (pid > 0) {
+      cprintf(ctx, "%6d  %s\n", (int)pid, name);
+    }
+    off += (size_t)rec;
+  }
+  free(buf);
+  return 0;
+}
+
+struct sig_entry {
+  const char *name;
+  int sig;
+};
+
+static const struct sig_entry SIGNALS[] = {
+    {"HUP", SIGHUP},   {"INT", SIGINT},   {"QUIT", SIGQUIT},
+    {"ILL", SIGILL},   {"ABRT", SIGABRT}, {"FPE", SIGFPE},
+    {"KILL", SIGKILL}, {"SEGV", SIGSEGV}, {"PIPE", SIGPIPE},
+    {"ALRM", SIGALRM}, {"TERM", SIGTERM}, {"USR1", SIGUSR1},
+    {"USR2", SIGUSR2}, {"STOP", SIGSTOP}, {"CONT", SIGCONT},
+};
+static const int N_SIGNALS = (int)(sizeof(SIGNALS) / sizeof(SIGNALS[0]));
+
+/* Resolve a signal token (without the leading '-'): a number, a bare name, or
+ * a name with the SIG prefix. Returns -1 if unrecognised. */
+static int sig_from_token(const char *t) {
+  if (t[0] >= '0' && t[0] <= '9') {
+    return atoi(t);
+  }
+  if (strncasecmp(t, "SIG", 3) == 0) {
+    t += 3;
+  }
+  for (int i = 0; i < N_SIGNALS; i++) {
+    if (strcasecmp(t, SIGNALS[i].name) == 0) {
+      return SIGNALS[i].sig;
+    }
+  }
+  return -1;
+}
+
+static int cmd_kill(int argc, char **argv, struct shell_ctx *ctx) {
+  if (argc > 1 && strcmp(argv[1], "-l") == 0) {
+    for (int i = 0; i < N_SIGNALS; i++) {
+      cprintf(ctx, "%2d) SIG%-6s%s", SIGNALS[i].sig, SIGNALS[i].name,
+              (i % 4 == 3 || i == N_SIGNALS - 1) ? "\n" : " ");
+    }
+    return 0;
+  }
+  int sig = SIGTERM;
+  int start = 1;
+  if (argc > 1 && argv[1][0] == '-' && argv[1][1] != '\0') {
+    const char *spec;
+    if (strcmp(argv[1], "-s") == 0) {
+      if (argc < 3) {
+        cerror(ctx, "kill: option requires an argument -- 's'\n");
+        return 1;
+      }
+      spec = argv[2];
+      start = 3;
+    } else {
+      spec = argv[1] + 1;
+      start = 2;
+    }
+    sig = sig_from_token(spec);
+    if (sig < 0) {
+      cerror(ctx, "kill: ");
+      cprintf(ctx, "%s: invalid signal\n", spec);
+      return 1;
+    }
+  }
+  if (start >= argc) {
+    cerror(ctx, "kill: usage: kill [-s signal | -signal] pid...\n");
+    return 1;
+  }
+  int rc = 0;
+  for (int a = start; a < argc; a++) {
+    char *end = NULL;
+    long pid = strtol(argv[a], &end, 10);
+    if (end == argv[a] || *end != '\0') {
+      cerror(ctx, "kill: ");
+      cprintf(ctx, "%s: arguments must be process IDs\n", argv[a]);
+      rc = 1;
+      continue;
+    }
+    if (kill((pid_t)pid, sig) != 0) {
+      cerror(ctx, "kill: ");
+      cprintf(ctx, "(%ld): %s\n", pid, strerror(errno));
+      rc = 1;
+    }
+  }
+  return rc;
+}
+
 /* --- dispatch table ---------------------------------------------------- */
 
 struct command {
@@ -1009,6 +1148,7 @@ static const struct command COMMANDS[] = {
     {"rm", cmd_rm},       {"cp", cmd_cp},       {"mv", cmd_mv},
     {"head", cmd_head},   {"tail", cmd_tail},   {"grep", cmd_grep},
     {"less", cmd_pager},  {"more", cmd_pager},
+    {"ps", cmd_ps},       {"kill", cmd_kill},
     {"exit", cmd_exit},   {"quit", cmd_exit},
 };
 static const int N_COMMANDS = (int)(sizeof(COMMANDS) / sizeof(COMMANDS[0]));
