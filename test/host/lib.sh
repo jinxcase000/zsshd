@@ -61,3 +61,19 @@ free_port() {
 port_open() {
   python3 -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 2).close()' "$1" 2> /dev/null
 }
+
+# build_host_shell ROOT LIBSSH OUT PORT DIR [CFLAGS...]: build the daemon at
+# OUT with the real shell (shell.c; console-only calls stubbed by
+# test/host/shell_host.c), listening on 127.0.0.1:PORT with DIR as its data
+# and config folder. ROOT is the checkout, LIBSSH the libssh prefix
+# (libssh_prefix). CFLAGS are added, e.g. -DZSSHD_TEST_UTIMENSAT_FAIL.
+build_host_shell() {
+  bh_root=$1 bh_p=$2 bh_out=$3 bh_port=$4 bh_dir=$5
+  shift 5
+  cc -Wall -Werror -DPLATFORM_PS5 "$@" -DZSSHD_PORT="$bh_port" \
+    -DZSSHD_DIR="\"$bh_dir\"" -DZSSHD_CONFIG_DIR="\"$bh_dir\"" \
+    -I"$bh_root/include" -I"$bh_root/include/platform" -I"$bh_p/include" \
+    -o "$bh_out" "$bh_root/test/host/main.c" "$bh_root/test/host/shell_host.c" \
+    "$bh_root/src/app/ssh_server.c" "$bh_root/src/app/zsshd_config.c" \
+    "$bh_root/src/app/shell.c" -L"$bh_p/lib" -lssh -lpthread
+}
