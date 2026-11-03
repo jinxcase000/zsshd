@@ -1,6 +1,6 @@
 """SFTP host test client (paramiko), driven by test/host/sftp.sh.
 
-usage: sftp.py <port> <keyfile> <workdir>
+usage: sftp.py <port> <keyfile> <workdir> [nohardlinks]
 
 Against a host build of ssh_server.c linked to the vendored libssh, checks:
   - 3 sessions in a row, each: a pipelined get, a get with one 32 KB read in
@@ -11,25 +11,34 @@ Against a host build of ssh_server.c linked to the vendored libssh, checks:
     and the session stays usable.
   - rename (plain rename onto an existing name refused, posix-rename replaces
     it), fstat on an open handle, fsetstat (chmod and utime through the handle,
-    then stat), and hardlink@openssh.com (raw extended request).
+    then stat), and hardlink@openssh.com (offered in SSH_FXP_VERSION; a raw
+    extended request makes a real link).
   - the same rename and hardlink checks in <workdir>/nolink, where the
     server's link() reports success without creating anything: the rename
     still moves the file (never deletes it) and hardlink answers an error.
     These all run, then the script exits non-zero if any failed.
+With nohardlinks (a server built with SFTP_NO_HARDLINKS, as for the PS5) only
+the rename checks run, plus: hardlink@openssh.com is not in the server's
+SSH_FXP_VERSION extensions and answers SSH_FX_OP_UNSUPPORTED, making no name.
 Prints one line per check and exits non-zero on the first failure. Rates are
 printed for reference only: loopback has no real round trip, so they say
 nothing about the console.
 """
 import hashlib
 import os
+import struct
 import sys
 import time
 
 import paramiko
-from paramiko.sftp import CMD_DATA, CMD_EXTENDED, CMD_READ
+from paramiko.message import Message
+from paramiko.sftp import (CMD_DATA, CMD_EXTENDED, CMD_INIT, CMD_READ,
+                           CMD_STATUS, CMD_VERSION)
 from paramiko.sftp_file import int64
 
+SSH_FX_OP_UNSUPPORTED = 8
 port, keyf, work = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+nohardlinks = len(sys.argv) > 4 and sys.argv[4] == "nohardlinks"
 src = os.path.join(work, "src.bin")
 key = paramiko.Ed25519Key.from_private_key_file(keyf)
 
@@ -54,9 +63,62 @@ def check(ok, what):
         sys.exit(1)
 
 
+def ext_status(s, name, *args):
+    """Send extended request `name`; return its status reply (code, message).
+    paramiko's _request() reads and raises on the status itself, so the reply
+    is read here instead."""
+    num = s._async_request(type(None), CMD_EXTENDED, name, *args)
+    tp, data = s._read_packet()
+    msg = Message(data)
+    rid = msg.get_int()
+    with s._lock:
+        s._expecting.pop(rid, None)
+    if tp != CMD_STATUS or rid != num:
+        raise IOError(f"reply type {tp} id {rid}, want a status for {num}")
+    return msg.get_int(), msg.get_text()
+
+
+def server_extensions():
+    """The extension names in the server's SSH_FXP_VERSION (paramiko drops
+    them), from an INIT on a connection of its own (the server takes one
+    channel per connection)."""
+    t = paramiko.Transport(("127.0.0.1", port))
+    t.connect(username="test", pkey=key)
+    try:
+        return _version_extensions(t.open_session())
+    finally:
+        t.close()
+
+
+def _version_extensions(ch):
+    """Send SSH_FXP_INIT on channel ch; return the reply's extension names."""
+    ch.settimeout(20)
+    ch.invoke_subsystem("sftp")
+    ch.sendall(struct.pack(">IBI", 5, CMD_INIT, 3))
+
+    def recv(n):
+        b = b""
+        while len(b) < n:
+            got = ch.recv(n - len(b))
+            if not got:
+                raise EOFError("channel closed in SSH_FXP_VERSION")
+            b += got
+        return b
+
+    body = recv(struct.unpack(">I", recv(4))[0])
+    ch.close()
+    if body[0] != CMD_VERSION:
+        raise IOError(f"reply type {body[0]} to INIT")
+    m, names = Message(body[5:]), []
+    while m.get_remainder():
+        names.append(m.get_text())
+        m.get_text()  # the extension's data
+    return names
+
+
 want = sha(src)
 size = os.path.getsize(src)
-for r in range(3):
+for r in range(0 if nohardlinks else 3):
     t, s = connect()
     dst = os.path.join(work, "get.bin")
     t0 = time.time()
@@ -86,16 +148,17 @@ for r in range(3):
     t.close()
     time.sleep(0.5)  # let the server finish its side of the close
 
-t, s = connect()
-f = s.open(src, "rb")
-tp, msg = s._request(CMD_READ, f.handle, int64(0), 1048576)
-data = msg.get_string() if tp == CMD_DATA else b""
-with open(src, "rb") as fh:
-    head = fh.read(len(data))
-check(len(data) == 261120 and data == head,
-      f"1 MB read answered short: {len(data)} bytes, content matches")
-check(s.stat(src).st_size == size, "session still usable after the oversized read")
-t.close()
+if not nohardlinks:
+    t, s = connect()
+    f = s.open(src, "rb")
+    tp, msg = s._request(CMD_READ, f.handle, int64(0), 1048576)
+    data = msg.get_string() if tp == CMD_DATA else b""
+    with open(src, "rb") as fh:
+        head = fh.read(len(data))
+    check(len(data) == 261120 and data == head,
+          f"1 MB read answered short: {len(data)} bytes, content matches")
+    check(s.stat(src).st_size == size, "session still usable after the oversized read")
+    t.close()
 
 # --- rename, fstat, fsetstat, posix-rename, hardlink --------------------
 bad = []
@@ -184,8 +247,7 @@ def t_fsetstat():
 
 
 def t_hardlink():
-    tp, msg = s._request(CMD_EXTENDED, "hardlink@openssh.com", c, link)
-    code = msg.get_int()
+    code, _ = ext_status(s, "hardlink@openssh.com", c, link)
     ok = (code == 0 and rd(link) == rd(c) and os.stat(link).st_ino == os.stat(c).st_ino
           and os.stat(c).st_nlink == 2)
     return ok, f"hardlink@openssh.com status {code}, same content, same inode, nlink 2"
@@ -228,26 +290,45 @@ def t_nolink_rename_refused():
 
 def t_nolink_hardlink():
     wr(nc_, b"gamma")
-    try:  # paramiko raises on an error status
-        tp, msg = s._request(CMD_EXTENDED, "hardlink@openssh.com", nc_, nlink)
-        answer = f"status {msg.get_int()}"
-        refused = False
-    except IOError as e:
-        answer = f"error ({e})"
-        refused = True
+    code, text = ext_status(s, "hardlink@openssh.com", nc_, nlink)
+    answer, refused = f"status {code} ({text})", code != 0
     return (refused and not os.path.lexists(nlink) and rd(nc_) == b"gamma"), \
         f"hardlink@openssh.com answered {answer} (want an error), no link, c kept"
+
+
+def t_hardlink_not_offered():
+    names = server_extensions()
+    return ("hardlink@openssh.com" not in names and "posix-rename@openssh.com" in names), \
+        f"SSH_FXP_VERSION extensions {names}: no hardlink@openssh.com, posix-rename kept"
+
+
+def t_hardlink_offered():
+    names = server_extensions()
+    return ("hardlink@openssh.com" in names and "posix-rename@openssh.com" in names), \
+        f"SSH_FXP_VERSION extensions {names}: hardlink and posix-rename offered"
+
+
+def t_hardlink_unsupported():
+    wr(c, b"gamma")
+    code, text = ext_status(s, "hardlink@openssh.com", c, link)
+    return (code == SSH_FX_OP_UNSUPPORTED and not os.path.lexists(link) and rd(c) == b"gamma"), \
+        f"hardlink@openssh.com answered status {code} ({text}), want {SSH_FX_OP_UNSUPPORTED}; no link, c kept"
 
 
 attempt("rename", t_rename)
 attempt("rename refused", t_rename_refused)
 attempt("posix-rename", t_posix_rename)
-attempt("fstat", t_fstat)
-attempt("fsetstat", t_fsetstat)
-attempt("hardlink", t_hardlink)
-attempt("rename, link() a no-op", t_nolink_rename)
-attempt("rename refused, link() a no-op", t_nolink_rename_refused)
-attempt("hardlink, link() a no-op", t_nolink_hardlink)
+if nohardlinks:
+    attempt("no hardlinks: hardlink not offered", t_hardlink_not_offered)
+    attempt("no hardlinks: hardlink unsupported", t_hardlink_unsupported)
+else:
+    attempt("fstat", t_fstat)
+    attempt("fsetstat", t_fsetstat)
+    attempt("hardlink offered", t_hardlink_offered)
+    attempt("hardlink", t_hardlink)
+    attempt("rename, link() a no-op", t_nolink_rename)
+    attempt("rename refused, link() a no-op", t_nolink_rename_refused)
+    attempt("hardlink, link() a no-op", t_nolink_hardlink)
 try:
     t.close()
 except Exception:
