@@ -11,8 +11,11 @@ Against a host build of ssh_server.c linked to the vendored libssh, checks:
     and the session stays usable.
   - rename (plain rename onto an existing name refused, posix-rename replaces
     it), fstat on an open handle, fsetstat (chmod and utime through the handle,
-    then stat), and hardlink@openssh.com (raw extended request). These all run,
-    then the script exits non-zero if any failed.
+    then stat), and hardlink@openssh.com (raw extended request).
+  - the same rename and hardlink checks in <workdir>/nolink, where the
+    server's link() reports success without creating anything: the rename
+    still moves the file (never deletes it) and hardlink answers an error.
+    These all run, then the script exits non-zero if any failed.
 Prints one line per check and exits non-zero on the first failure. Rates are
 printed for reference only: loopback has no real round trip, so they say
 nothing about the console.
@@ -188,12 +191,63 @@ def t_hardlink():
     return ok, f"hardlink@openssh.com status {code}, same content, same inode, nlink 2"
 
 
+# In <workdir>/nolink the server's link() returns 0 and creates nothing (sftp.sh
+# sets ZSSHD_TEST_LINK_NOOP_DIR; test/host/link_fault.c). A plain rename must
+# still move the file, never delete it.
+nl = os.path.join(work, "nolink")
+os.makedirs(nl, exist_ok=True)
+na, nb, nc_, nlink = (os.path.join(nl, n) for n in ("a", "b", "c", "link"))
+for pth in (na, nb, nc_, nlink):
+    if os.path.lexists(pth):
+        os.remove(pth)
+
+
+def t_nolink_rename():
+    wr(na, b"alpha")
+    try:
+        s.rename(na, nb)
+        st = "OK"
+    except IOError as e:
+        st = f"refused ({e})"
+    kept = os.path.exists(nb) and rd(nb) == b"alpha"
+    return (not os.path.exists(na) and kept), \
+        f"rename answered {st}; a gone {not os.path.exists(na)}, b holds the data {kept}"
+
+
+def t_nolink_rename_refused():
+    wr(na, b"new-a")
+    try:
+        s.rename(na, nb)
+    except IOError:
+        refused = True
+    else:
+        refused = False
+    return (refused and os.path.exists(na) and rd(na) == b"new-a" and rd(nb) == b"alpha"), \
+        f"rename onto an existing name refused {refused}, both files untouched"
+
+
+def t_nolink_hardlink():
+    wr(nc_, b"gamma")
+    try:  # paramiko raises on an error status
+        tp, msg = s._request(CMD_EXTENDED, "hardlink@openssh.com", nc_, nlink)
+        answer = f"status {msg.get_int()}"
+        refused = False
+    except IOError as e:
+        answer = f"error ({e})"
+        refused = True
+    return (refused and not os.path.lexists(nlink) and rd(nc_) == b"gamma"), \
+        f"hardlink@openssh.com answered {answer} (want an error), no link, c kept"
+
+
 attempt("rename", t_rename)
 attempt("rename refused", t_rename_refused)
 attempt("posix-rename", t_posix_rename)
 attempt("fstat", t_fstat)
 attempt("fsetstat", t_fsetstat)
 attempt("hardlink", t_hardlink)
+attempt("rename, link() a no-op", t_nolink_rename)
+attempt("rename refused, link() a no-op", t_nolink_rename_refused)
+attempt("hardlink, link() a no-op", t_nolink_hardlink)
 try:
     t.close()
 except Exception:

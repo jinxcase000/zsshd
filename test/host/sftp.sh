@@ -29,7 +29,11 @@ else
   }
   PY=$W/venv/bin/python
 fi
+# -include link_fault.h routes the SFTP server's link() calls through
+# test/host/link_fault.c, so a link() that reports success without creating
+# anything can be simulated (ZSSHD_TEST_LINK_NOOP_DIR, set below).
 cmake -S "$root/external/libssh-0.12.2" -B "$W/libssh" -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_FLAGS="-include $here/link_fault.h" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=OFF -DBUILD_SHARED_LIBS=OFF \
   -DOPENSSL_ROOT_DIR="$OSSL" -DWITH_SERVER=ON -DWITH_SFTP=ON -DWITH_GSSAPI=OFF \
   -DWITH_ZLIB=OFF -DWITH_EXAMPLES=OFF -DUNIT_TESTING=OFF \
@@ -49,12 +53,14 @@ PORT=$(free_port)
 cc -Wall -Werror -DPLATFORM_PS5 -DZSSHD_PORT=$PORT -DZSSHD_DIR="\"$W/dir\"" -DZSSHD_CONFIG_DIR="\"$W/dir\"" \
   -I"$root/include" -I"$root/include/platform" \
   -I"$W/prefix/include" -o "$W/zsshd-host" "$here/main.c" "$here/stub.c" \
+  "$here/link_fault.c" \
   "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" "$W/prefix/lib/libssh.a" \
   -L"$OSSL/lib" -lcrypto -lpthread
 ssh-keygen -q -t ed25519 -N '' -f "$W/key"
 cp "$W/key.pub" "$W/dir/authorized_keys"
 head -c 104857600 /dev/urandom > "$W/work/src.bin"
-"$W/zsshd-host" > "$W/server.log" 2>&1 &
+# Inside work/nolink/ the server's link() returns 0 and creates nothing.
+ZSSHD_TEST_LINK_NOOP_DIR="$W/work/nolink/" "$W/zsshd-host" > "$W/server.log" 2>&1 &
 echo $! > "$W/pid"
 sleep 2
 # Fail fast: the port was picked before the server could bind it, so another
