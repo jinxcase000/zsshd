@@ -20,7 +20,8 @@ SRCS := \
 	src/app/zsshd_config.c \
 	src/app/firstrun.c \
 	src/app/shell.c \
-	src/platform/pal_notification.c
+	src/platform/pal_notification.c \
+	src/platform/ps5_syscall.S
 
 CFLAGS := -Wall -Werror -g
 CFLAGS += -DPLATFORM_PS5
@@ -40,13 +41,29 @@ LIBS := $(PREFIX)/lib/libssh.a \
 	$(PREFIX)/lib/libeverest.a \
 	$(PREFIX)/lib/libp256m.a
 
+# The SDK libc's raw system call stubs (src/platform/ps5_raw_syscalls.txt)
+# report a failure as a positive return value with errno untouched. The ones
+# the build calls are wrapped: a call goes to the error-reporting wrapper in
+# src/platform/ps5_syscall.S (keep RAW_WRAPPED and that file in step). The
+# linker traces every other stub name, and the build fails if anything
+# references one, so a new call to a raw stub cannot slip in.
+RAW_WRAPPED := link symlink readlink chown fchown utimensat getfsstat getpgrp \
+	syscall __syscall
+RAW_STUBS := $(shell cat src/platform/ps5_raw_syscalls.txt)
+LDFLAGS := $(foreach s,$(RAW_WRAPPED),-Wl,--wrap=$(s))
+LDFLAGS += $(foreach s,$(filter-out $(RAW_WRAPPED),$(RAW_STUBS)),-Wl,--trace-symbol=$(s))
+
 all: $(ELF)
 
-$(ELF): $(SRCS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
+$(ELF): $(SRCS) src/platform/ps5_raw_syscalls.txt
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRCS) $(LIBS) > $@.trace
+	@if grep ': reference to ' $@.trace; then \
+	  echo "error: the lines above call raw SDK syscall stubs that report failure as success; wrap them in src/platform/ps5_syscall.S and RAW_WRAPPED" >&2; \
+	  rm -f $@; exit 1; \
+	fi; rm -f $@.trace
 
 clean:
-	rm -f $(ELF)
+	rm -f $(ELF) $(ELF).trace
 
 test: $(ELF)
 	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $^
