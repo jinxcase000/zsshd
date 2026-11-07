@@ -47,7 +47,7 @@ LIBS := $(PREFIX)/lib/libssh.a \
 # src/platform/ps5_syscall.S (keep RAW_WRAPPED and that file in step). The
 # linker traces every other stub name, and the build fails if anything
 # references one, so a new call to a raw stub cannot slip in.
-RAW_WRAPPED := link symlink readlink chown fchown utimensat getfsstat getpgrp \
+RAW_WRAPPED := link symlink readlink chown fchown utimensat getfsstat statfs getpgrp \
 	syscall __syscall
 RAW_STUBS := $(shell cat src/platform/ps5_raw_syscalls.txt)
 LDFLAGS := $(foreach s,$(RAW_WRAPPED),-Wl,--wrap=$(s))

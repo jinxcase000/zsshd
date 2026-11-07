@@ -76,6 +76,7 @@ RAW(getpgrp)
 RAW(utimensat)
 #endif
 RAW(getfsstat)
+RAW(statfs)
 INDIRECT(syscall)
 INDIRECT(__syscall)
 
