@@ -39,6 +39,9 @@
 
 static ssh_bind g_bind = NULL;
 static volatile sig_atomic_t g_running = 0;
+/* /data/zsshd/passwordauth: 0 turns password login off (public key only);
+ * default 1. Read once at startup, like the other settings. */
+static int g_password_auth = 1;
 
 /* Per-session state threaded through the libssh callbacks. */
 struct session_state {
@@ -55,32 +58,20 @@ struct session_state {
   ssh_channel channel;
 };
 
-/* --- optional-auth helpers -------------------------------------------- */
+/* --- auth helpers ----------------------------------------------------- */
 
+/* Login needs a credential: a password file (unless password login is turned
+ * off) or an authorized_keys file. With neither, every login is refused; there
+ * is no passwordless ("none") login. Both files are checked per login, so
+ * adding one takes effect without a restart. */
 static int password_auth_configured(void) {
-  return access(ZSSHD_PASSWORD, F_OK) == 0;
+  return g_password_auth && access(ZSSHD_PASSWORD, F_OK) == 0;
 }
 static int pubkey_auth_configured(void) {
   return access(ZSSHD_AUTHKEYS, F_OK) == 0;
 }
-/* Passwordless root is the default, but only while the operator has not opted
- * into a real method by dropping in a password or authorized_keys file. */
-static int none_auth_allowed(void) {
-  return !password_auth_configured() && !pubkey_auth_configured();
-}
 
 /* --- auth callbacks --------------------------------------------------- */
-
-static int auth_none_cb(ssh_session session, const char *user, void *userdata) {
-  (void)session;
-  (void)user;
-  struct session_state *st = (struct session_state *)userdata;
-  if (!none_auth_allowed()) {
-    return SSH_AUTH_DENIED;
-  }
-  st->authenticated = 1;
-  return SSH_AUTH_SUCCESS;
-}
 
 static int auth_password_cb(ssh_session session, const char *user,
                             const char *password, void *userdata) {
@@ -88,6 +79,9 @@ static int auth_password_cb(ssh_session session, const char *user,
   (void)user;
   struct session_state *st = (struct session_state *)userdata;
 
+  if (!g_password_auth) {
+    return SSH_AUTH_DENIED; /* password login turned off */
+  }
   FILE *f = fopen(ZSSHD_PASSWORD, "r");
   if (!f) {
     return SSH_AUTH_DENIED; /* password method not configured */
@@ -99,6 +93,9 @@ static int auth_password_cb(ssh_session session, const char *user,
     return SSH_AUTH_DENIED;
   }
   stored[strcspn(stored, "\r\n")] = '\0';
+  if (stored[0] == '\0') {
+    return SSH_AUTH_DENIED; /* an empty password is no credential */
+  }
 
   if (strcmp(stored, password) == 0) {
     st->authenticated = 1;
@@ -251,16 +248,17 @@ static void *handle_session(void *arg) {
   struct ssh_server_callbacks_struct server_cb;
   memset(&server_cb, 0, sizeof(server_cb));
   server_cb.userdata = &st;
-  server_cb.auth_none_function = auth_none_cb;
   server_cb.auth_password_function = auth_password_cb;
   server_cb.auth_pubkey_function = auth_pubkey_cb;
   server_cb.channel_open_request_session_function = channel_open_cb;
   ssh_callbacks_init(&server_cb);
   ssh_set_server_callbacks(session, &server_cb);
 
-  int methods = SSH_AUTH_METHOD_PASSWORD | SSH_AUTH_METHOD_PUBLICKEY;
-  if (none_auth_allowed()) {
-    methods |= SSH_AUTH_METHOD_NONE;
+  /* No "none" method: it has no callback, so libssh answers it with an auth
+   * failure. Password is offered unless turned off in passwordauth. */
+  int methods = SSH_AUTH_METHOD_PUBLICKEY;
+  if (g_password_auth) {
+    methods |= SSH_AUTH_METHOD_PASSWORD;
   }
   ssh_set_auth_methods(session, methods);
 
@@ -405,7 +403,7 @@ int ssh_server_run(void) {
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_BINDPORT, &port);
   /* Optional bind address: /data/zsshd/bindaddr restricts the listener to
    * one interface (e.g. a LAN or Tailscale IP) instead of all interfaces.
-   * Recommended when running passwordless root. Unset = listen on 0.0.0.0. */
+   * Unset = listen on 0.0.0.0. */
   char bindaddr[64];
   if (zsshd_config_str("bindaddr", bindaddr, sizeof(bindaddr))) {
     ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_BINDADDR, bindaddr);
@@ -416,6 +414,8 @@ int ssh_server_run(void) {
     int loglevel = zsshd_config_int("loglevel", 0, 0, 4);
     ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_LOG_VERBOSITY, &loglevel);
   }
+  /* Password login: /data/zsshd/passwordauth 0 turns it off; default 1. */
+  g_password_auth = zsshd_config_int("passwordauth", 1, 0, 1);
   ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_HOSTKEY, ZSSHD_HOSTKEY);
   /* Prefer hardware-accelerated AES-GCM (PS5 CPU has AES-NI) for transfer
    * throughput, then AES-CTR, then software chacha20-poly1305. */
@@ -442,6 +442,11 @@ int ssh_server_run(void) {
 
   g_running = 1;
   printf("[zsshd] SSH listening on port %d\n", port);
+  int have_credential = password_auth_configured() || pubkey_auth_configured();
+  if (!have_credential) {
+    printf("[zsshd] no %s%s: all logins refused\n",
+           g_password_auth ? ZSSHD_PASSWORD " or " : "", ZSSHD_AUTHKEYS);
+  }
 
   {
     char ip[64];
@@ -453,8 +458,9 @@ int ssh_server_run(void) {
                ZSSHD_VERSION, ip, port, autopw);
     } else {
       snprintf(toast, sizeof(toast),
-               "zSSHd [ver.%s] by JinxCase Started\n%s:%d", ZSSHD_VERSION, ip,
-               port);
+               "zSSHd [ver.%s] by JinxCase Started\n%s:%d%s", ZSSHD_VERSION,
+               ip, port,
+               have_credential ? "" : "\nNo login set up: all refused");
     }
     pal_notification_send(toast);
   }
