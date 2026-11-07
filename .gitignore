@@ -1,5 +1,6 @@
 # compiled payload(s)
 *.elf
+*.elf.trace
 
 # CMake build trees (regenerated from the dependency sources)
 /build/
