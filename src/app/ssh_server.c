@@ -121,9 +121,13 @@ static int pubkey_in_authorized(ssh_key offered) {
       continue;
     }
     /* authorized_keys lines are "<type> <base64> [comment]"; libssh wants
-     * just the base64 blob with its type prefix. */
-    char *type = strtok(line, " \t");
-    char *b64 = type ? strtok(NULL, " \t") : NULL;
+     * just the base64 blob with its type prefix. strtok_r, not strtok: every
+     * session runs this on its own thread, and strtok keeps one position for
+     * the whole process, so two logins at once can mis-parse each other's
+     * line and deny a valid key. */
+    char *save = NULL;
+    char *type = strtok_r(line, " \t", &save);
+    char *b64 = type ? strtok_r(NULL, " \t", &save) : NULL;
     if (!type || !b64) {
       continue;
     }
