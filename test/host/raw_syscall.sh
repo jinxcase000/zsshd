@@ -9,6 +9,10 @@
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
+if [ ! -f "$root/src/platform/ps5_syscall.S" ]; then
+  echo "SKIP: src/platform/ps5_syscall.S is not in this tree"
+  exit 0
+fi
 case "$(uname -s)/$(uname -m)" in
   Darwin/x86_64 | FreeBSD/amd64) ;;
   *)
