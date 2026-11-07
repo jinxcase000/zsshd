@@ -194,6 +194,31 @@ scp ./file root@<ps5-ip>:/data/dir/
   - Renaming over SFTP fails — rename via the shell instead:
     `ssh root@<ps5-ip> 'mv old new'`.
 
+## Host tests
+
+`test/host/` holds tests that run on a development machine (macOS, FreeBSD or
+Linux) with no console. Each `*.sh` script builds `ssh_server.c` against
+`test/host/stub.c` (a stand-in for the PS5 shell and platform calls), starts it
+on 127.0.0.1 and checks it with a libssh or paramiko client. `lib.sh` holds the
+shared helpers; the `.c` and `.py` files are the clients and fault-injection
+helpers the scripts use.
+
+Prerequisites: a C compiler, libssh 0.10+ (headers and library), and python3.
+`sftp.sh` also needs cmake and OpenSSL headers; it builds the vendored libssh
+and installs paramiko into a throwaway virtualenv (network access, or a local
+wheel directory via `PIP_FIND_LINKS` / `PIP_NO_INDEX`).
+
+Every script picks a free port and a temporary config directory per run, so
+several can run at once. Run one with, for example:
+
+```sh
+sh test/host/run.sh
+```
+
+A script exits non-zero when a check fails; a script
+whose subject is not in the tree (for example `raw_syscall.sh` without
+`src/platform/ps5_syscall.S`) reports SKIP and exits 0.
+
 ## Versioning
 
 See [`CHANGELOG.md`](CHANGELOG.md). The version is defined once in
