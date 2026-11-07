@@ -3,10 +3,12 @@
 #if defined(PLATFORM_PS5)
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -14,6 +16,7 @@
 #endif
 
 #define SCP_CHUNK 32768 /* streaming block size; never buffer a whole file */
+#define SCP_MAXDEPTH 64 /* max directory nesting for recursive scp */
 
 /* --- argument parsing ------------------------------------------------- */
 
@@ -116,6 +119,16 @@ static int is_dir(const char *path) {
 
 /* --- sink ------------------------------------------------------------- */
 
+/* Apply atime/mtime from a T line (best effort). */
+static void scp_apply_times(const char *path, long atime, long mtime) {
+  struct timeval tv[2];
+  tv[0].tv_sec = (time_t)atime;
+  tv[0].tv_usec = 0;
+  tv[1].tv_sec = (time_t)mtime;
+  tv[1].tv_usec = 0;
+  (void)utimes(path, tv);
+}
+
 int scp_sink(ssh_channel channel, const char *command) {
   char tmp[2048];
   snprintf(tmp, sizeof(tmp), "%s", command);
@@ -129,7 +142,7 @@ int scp_sink(ssh_channel channel, const char *command) {
       if (strchr(argv[i], 'd')) {
         target_is_dir_flag = 1;
       }
-      /* -t (sink), -r, -p are tolerated; -r/-p behaviour is limited below */
+      /* -t (sink), -r (recursive) and -p (times) are all handled below */
     } else {
       dest = argv[i]; /* last non-flag token is the destination */
     }
@@ -147,6 +160,22 @@ int scp_sink(ssh_channel channel, const char *command) {
   }
   int dest_is_dir = target_is_dir_flag || is_dir(destbuf);
 
+  /* Directory stack for recursive uploads (D pushes, E pops). Heap-allocated
+   * to keep the per-session thread stack small. */
+  char(*dirstack)[PATH_MAX] = malloc(sizeof(*dirstack) * SCP_MAXDEPTH);
+  if (!dirstack) {
+    scp_fatal(channel, "scp: out of memory");
+    return 1;
+  }
+  int depth = 0;
+  char curdir[PATH_MAX];
+  snprintf(curdir, sizeof(curdir), "%s", destbuf);
+  int at_top = 1;
+
+  /* Pending timestamps from a T line, applied to the next file or directory. */
+  int have_time = 0;
+  long t_atime = 0, t_mtime = 0;
+
   scp_ack(channel); /* tell the client we are ready */
 
   int rc = 0;
@@ -161,15 +190,61 @@ int scp_sink(ssh_channel channel, const char *command) {
       rc = 1; /* client reported an error */
       break;
     }
-    if (op == 'T' || op == 'E') {
-      scp_ack(channel); /* timestamps / leave-dir: accept and ignore */
+
+    if (op == 'T') {
+      long mt, mtu, at, atu;
+      if (sscanf(line, "T%ld %ld %ld %ld", &mt, &mtu, &at, &atu) >= 3) {
+        t_mtime = mt;
+        t_atime = at;
+        have_time = 1;
+      }
+      scp_ack(channel);
       continue;
     }
+
     if (op == 'D') {
-      scp_fatal(channel, "scp: recursive upload not supported yet");
-      rc = 1;
-      break;
+      unsigned mode = 0;
+      long long zero = 0;
+      char name[256] = {0};
+      if (sscanf(line, "D%o %lld %255[^\n]", &mode, &zero, name) < 3) {
+        scp_fatal(channel, "scp: bad directory header");
+        rc = 1;
+        break;
+      }
+      char newdir[PATH_MAX];
+      if (at_top && !dest_is_dir) {
+        snprintf(newdir, sizeof(newdir), "%s", destbuf);
+      } else {
+        snprintf(newdir, sizeof(newdir), "%s/%s", curdir, name);
+      }
+      if (mkdir(newdir, mode ? (mode & 0777) : 0755) != 0 && errno != EEXIST) {
+        scp_fatal(channel, "scp: cannot create directory");
+        rc = 1;
+        break;
+      }
+      if (have_time) {
+        scp_apply_times(newdir, t_atime, t_mtime);
+        have_time = 0;
+      }
+      if (depth < SCP_MAXDEPTH) {
+        snprintf(dirstack[depth], PATH_MAX, "%s", curdir);
+        depth++;
+      }
+      snprintf(curdir, sizeof(curdir), "%s", newdir);
+      at_top = 0;
+      scp_ack(channel);
+      continue;
     }
+
+    if (op == 'E') {
+      if (depth > 0) {
+        depth--;
+        snprintf(curdir, sizeof(curdir), "%s", dirstack[depth]);
+      }
+      scp_ack(channel);
+      continue;
+    }
+
     if (op != 'C') {
       scp_fatal(channel, "scp: protocol error");
       rc = 1;
@@ -180,17 +255,18 @@ int scp_sink(ssh_channel channel, const char *command) {
     unsigned mode = 0;
     long long size = 0;
     char name[256] = {0};
-    if (sscanf(line, "C%o %lld %255[^\n]", &mode, &size, name) != 3 || size < 0) {
+    if (sscanf(line, "C%o %lld %255[^\n]", &mode, &size, name) != 3 ||
+        size < 0) {
       scp_fatal(channel, "scp: bad file header");
       rc = 1;
       break;
     }
 
     char path[PATH_MAX];
-    if (dest_is_dir) {
-      snprintf(path, sizeof(path), "%s/%s", destbuf, name);
-    } else {
+    if (at_top && !dest_is_dir) {
       snprintf(path, sizeof(path), "%s", destbuf);
+    } else {
+      snprintf(path, sizeof(path), "%s/%s", curdir, name);
     }
 
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC,
@@ -234,6 +310,10 @@ int scp_sink(ssh_channel channel, const char *command) {
       rc = 1;
       break;
     }
+    if (have_time) {
+      scp_apply_times(path, t_atime, t_mtime);
+      have_time = 0;
+    }
 
     /* client's trailing status byte for this file (0 = ok) */
     char tb;
@@ -247,6 +327,7 @@ int scp_sink(ssh_channel channel, const char *command) {
     }
     scp_ack(channel); /* acknowledge the file */
   }
+  free(dirstack);
   return rc;
 }
 
