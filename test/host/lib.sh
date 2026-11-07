@@ -70,10 +70,25 @@ port_open() {
 build_host_shell() {
   bh_root=$1 bh_p=$2 bh_out=$3 bh_port=$4 bh_dir=$5
   shift 5
-  cc -Wall -Werror -DPLATFORM_PS5 "$@" -DZSSHD_PORT="$bh_port" \
+  # Helper sources shell.c links against on branches that have them.
+  bh_extra=
+  for bh_h in cmdline diskfmt timeutil; do
+    if [ -f "$bh_root/src/app/$bh_h.c" ]; then
+      bh_extra="$bh_extra $bh_root/src/app/$bh_h.c"
+    fi
+  done
+  # The console has CLOCK_UPTIME; macOS calls it CLOCK_UPTIME_RAW and Linux
+  # has CLOCK_BOOTTIME. FreeBSD already defines it.
+  case $(uname -s) in
+    Darwin) bh_clk=-DCLOCK_UPTIME=CLOCK_UPTIME_RAW ;;
+    Linux) bh_clk=-DCLOCK_UPTIME=CLOCK_BOOTTIME ;;
+    *) bh_clk=-DZSSHD_HOST_NO_CLOCK_SHIM ;;
+  esac
+  # bh_extra is deliberately unquoted: a word list of source paths.
+  cc -Wall -Werror -DPLATFORM_PS5 "$bh_clk" "$@" -DZSSHD_PORT="$bh_port" \
     -DZSSHD_DIR="\"$bh_dir\"" -DZSSHD_CONFIG_DIR="\"$bh_dir\"" \
     -I"$bh_root/include" -I"$bh_root/include/platform" -I"$bh_p/include" \
     -o "$bh_out" "$bh_root/test/host/main.c" "$bh_root/test/host/shell_host.c" \
     "$bh_root/src/app/ssh_server.c" "$bh_root/src/app/zsshd_config.c" "$bh_root/src/app/firstrun.c" \
-    "$bh_root/src/app/shell.c" -L"$bh_p/lib" -lssh -lpthread
+    "$bh_root/src/app/shell.c" $bh_extra -L"$bh_p/lib" -lssh -lpthread
 }
