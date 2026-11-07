@@ -126,7 +126,7 @@ int firstrun_password(char *out, size_t cap) {
   if (access(FR_PASSWORD, F_OK) != 0) {
     /* no credential at all: generate one so the console stays reachable */
     (void)mkdir(FR_DIR, 0700);
-    char pw[17];
+    char pw[9]; /* 8 chars: short enough to read off the TV toast */
     fr_gen(pw, sizeof(pw));
     if (fr_write(FR_PASSWORD, pw, 0600) != 0) {
       return 0; /* could not persist; leave it to "no login" */

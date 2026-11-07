@@ -14,7 +14,7 @@ other payloads/mods can automate against it.
   on first run at `/data/zsshd/hostkey`.
 - **Post-quantum key exchange** (`mlkem768x25519-sha256`, `sntrup761x25519-sha512`)
   — no "store now, decrypt later" warning from modern OpenSSH clients.
-- **Passwordless `root` by default**; optional password and/or public-key auth.
+- **Auto-generated root password on first run**, shown in the startup toast; optional operator-set password and/or public-key auth.
 - Interactive shell: eza-style `ls`, fish-style colored prompt, command history
   (Up/Down), and in-line editing (Left/Right, Home/End, Delete).
 - Built-in commands: `ls cd pwd cat echo whoami uname clear help exit`,
@@ -106,9 +106,14 @@ ssh root@<ps5-ip>
 
 ## Authentication
 
-Default: anyone can log in as `root` with **no password**. To require real auth,
-create either file on the console (the presence of either disables passwordless
-`none`):
+On first launch, if no credential is configured (no `password` file and no
+`authorized_keys`), zsshd generates a random root password, saves it to
+`/data/zsshd/password`, and shows it in the on-screen startup toast. **The
+toast is only visible briefly, right as the payload launches** — catch it then,
+or read it afterwards from `/data/zsshd/zsshd.log` (e.g. over FTP). It is
+re-shown at every launch until you set your own credential.
+
+To set your own, create either file on the console:
 
 - `/data/zsshd/password` — first line is the accepted password.
 - `/data/zsshd/authorized_keys` — OpenSSH `authorized_keys` format (one key per
