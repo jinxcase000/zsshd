@@ -12,6 +12,7 @@
 #include "pal_notification.h"
 #include "zsshd_version.h"
 #include "zsshd_config.h"
+#include "firstrun.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -426,6 +427,12 @@ int ssh_server_run(void) {
     ssh_bind_options_set(g_bind, SSH_BIND_OPTIONS_CIPHERS_S_C, ciphers);
   }
 
+  /* First-run: make sure there is a usable credential before we accept
+   * connections -- generates a random root password (shown on the TV) when
+   * nothing is configured. */
+  char autopw[64];
+  int show_pw = firstrun_password(autopw, sizeof(autopw));
+
   if (ssh_bind_listen(g_bind) != SSH_OK) {
     printf("[zsshd] bind/listen failed: %s\n", ssh_get_error(g_bind));
     ssh_bind_free(g_bind);
@@ -439,10 +446,16 @@ int ssh_server_run(void) {
   {
     char ip[64];
     local_ip(ip, sizeof(ip));
-    char toast[192];
-    snprintf(toast, sizeof(toast),
-             "zSSHd [ver.%s] by JinxCase Started\n%s:%d", ZSSHD_VERSION, ip,
-             port);
+    char toast[256];
+    if (show_pw) {
+      snprintf(toast, sizeof(toast),
+               "zSSHd [ver.%s] by JinxCase Started\n%s:%d\nroot password: %s",
+               ZSSHD_VERSION, ip, port, autopw);
+    } else {
+      snprintf(toast, sizeof(toast),
+               "zSSHd [ver.%s] by JinxCase Started\n%s:%d", ZSSHD_VERSION, ip,
+               port);
+    }
     pal_notification_send(toast);
   }
 
