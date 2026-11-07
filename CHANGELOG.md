@@ -3,6 +3,14 @@
 All notable changes to **zsshd** are recorded here.
 Format loosely follows [Keep a Changelog]; versioning is SemVer-ish.
 
+## [0.8.1] - 2026-11-06
+### Security
+- Removed the passwordless-root default. On first run with no credential (no
+  password file and no authorized_keys), zsshd generates a random 8-char root
+  password, stores it 0600, shows it in the startup toast, and logs it to
+  /data/zsshd/zsshd.log (readable over FTP). It is re-shown each boot until you
+  replace the password file or add authorized_keys.
+
 ## [0.8.0] - 2026-11-02
 ### Added
 - Input redirection and pipes in the shell:
