@@ -12,6 +12,7 @@
 #include "pal_notification.h"
 #include "zsshd_version.h"
 #include "zsshd_config.h"
+#include "scp.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -310,7 +311,11 @@ static void *handle_session(void *arg) {
       int status = 0;
       if (st.exec_requested) {
         /* `ssh host 'command'` */
-        status = shell_exec(st.channel, st.exec_cmd);
+        if (scp_is_sink(st.exec_cmd)) {
+          status = scp_sink(st.channel, st.exec_cmd);
+        } else {
+          status = shell_exec(st.channel, st.exec_cmd);
+        }
       } else if (st.channel_wanted_shell) {
         /* interactive iff a PTY was requested; otherwise scripted stdin */
         shell_run(st.channel, st.pty_requested, st.pty_rows);
