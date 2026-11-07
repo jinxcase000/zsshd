@@ -74,6 +74,6 @@ build_host_shell() {
     -DZSSHD_DIR="\"$bh_dir\"" -DZSSHD_CONFIG_DIR="\"$bh_dir\"" \
     -I"$bh_root/include" -I"$bh_root/include/platform" -I"$bh_p/include" \
     -o "$bh_out" "$bh_root/test/host/main.c" "$bh_root/test/host/shell_host.c" \
-    "$bh_root/src/app/ssh_server.c" "$bh_root/src/app/zsshd_config.c" \
+    "$bh_root/src/app/ssh_server.c" "$bh_root/src/app/zsshd_config.c" "$bh_root/src/app/firstrun.c" \
     "$bh_root/src/app/shell.c" -L"$bh_p/lib" -lssh -lpthread
 }

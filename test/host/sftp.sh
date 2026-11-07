@@ -59,7 +59,7 @@ build_server() {
     -DZSSHD_CONFIG_DIR="\"$W/dir\"" -I"$root/include" -I"$root/include/platform" \
     -I"$W/prefix-$bs_name/include" -o "$W/zsshd-$bs_name" "$here/main.c" "$here/stub.c" \
     "$here/link_fault.c" \
-    "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" \
+    "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" "$root/src/app/firstrun.c" \
     "$W/prefix-$bs_name/lib/libssh.a" \
     -L"$OSSL/lib" -lcrypto -lpthread
 }

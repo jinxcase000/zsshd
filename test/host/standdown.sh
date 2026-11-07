@@ -79,7 +79,7 @@ PORT=$(free_port)
 cc -Wall -Werror $CRYPTO -DPLATFORM_PS5 -DZSSHD_PORT=$PORT -DZSSHD_DIR="\"$W/dir\"" \
   -DZSSHD_CONFIG_DIR="\"$W/dir\"" -I"$root/include" -I"$root/include/platform" \
   -I"$W/prefix/include" -o "$W/zsshd-host" "$here/main.c" "$here/stub.c" \
-  "$here/libthr_mutex.c" "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" \
+  "$here/libthr_mutex.c" "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" "$root/src/app/firstrun.c" \
   "$W/prefix/lib/libssh.a" "$W/prefix/lib/libmbedcrypto.a" -lpthread
 # halt_on_error (the default) ends the server at the first report.
 export ASAN_OPTIONS=detect_leaks=0:abort_on_error=0

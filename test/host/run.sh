@@ -25,7 +25,7 @@ while [ "$DEFPORT" = "$PORT" ]; do DEFPORT=$(free_port); done
 echo "$PORT" > "$W/dir/port"
 cc -Wall -Werror -DPLATFORM_PS5 -DZSSHD_PORT=$DEFPORT -DZSSHD_DIR="\"$W/dir\"" -DZSSHD_CONFIG_DIR="\"$W/dir\"" \
   -I"$root/include" -I"$root/include/platform" -I"$P/include" \
-  -o "$W/zsshd-host" "$here/main.c" "$here/stub.c" "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" \
+  -o "$W/zsshd-host" "$here/main.c" "$here/stub.c" "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" "$root/src/app/firstrun.c" \
   -L"$P/lib" -lssh -lpthread
 cc -w -I"$P/include" -o "$W/client" "$here/client.c" -L"$P/lib" -lssh
 "$W/client" mkkey "$W/key" > "$W/dir/authorized_keys"
@@ -80,7 +80,7 @@ if [ -n "$LANIP" ]; then
   cc -Wall -Werror -DPLATFORM_PS5 -DZSSHD_PORT=$DEFPORT -DZSSHD_DIR="\"$W/bdir\"" -DZSSHD_CONFIG_DIR="\"$W/bdir\"" \
     -DZSSHD_PROBE_INTERVAL_S=1 -DZSSHD_PROBE_DEADLINE_S=1 \
     -I"$root/include" -I"$root/include/platform" -I"$P/include" \
-    -o "$W/zsshd-bind" "$here/main.c" "$here/stub.c" "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" \
+    -o "$W/zsshd-bind" "$here/main.c" "$here/stub.c" "$root/src/app/ssh_server.c" "$root/src/app/zsshd_config.c" "$root/src/app/firstrun.c" \
     -L"$P/lib" -lssh -lpthread
   "$W/zsshd-bind" > "$W/server3.log" 2>&1 &
   echo $! > "$W/pid"
