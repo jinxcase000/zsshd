@@ -243,11 +243,12 @@ static void *handle_session(void *arg) {
   struct session_state st;
   memset(&st, 0, sizeof(st));
 
-  if (ssh_handle_key_exchange(session) != SSH_OK) {
-    printf("[zsshd] key exchange failed: %s\n", ssh_get_error(session));
-    goto done;
-  }
-
+  /* The server callbacks go in before the key exchange, as in libssh's own
+   * example servers. The client sends its SERVICE_REQUEST right after its
+   * NEWKEYS; when both arrive in one read, libssh handles the request inside
+   * ssh_handle_key_exchange. With no server callbacks set yet, libssh queues
+   * it as a message that nothing here ever answers, and the client waits at
+   * auth until it times out (about 1 in 6000 loopback connections on macOS). */
   struct ssh_server_callbacks_struct server_cb;
   memset(&server_cb, 0, sizeof(server_cb));
   server_cb.userdata = &st;
@@ -263,6 +264,11 @@ static void *handle_session(void *arg) {
     methods |= SSH_AUTH_METHOD_NONE;
   }
   ssh_set_auth_methods(session, methods);
+
+  if (ssh_handle_key_exchange(session) != SSH_OK) {
+    printf("[zsshd] key exchange failed: %s\n", ssh_get_error(session));
+    goto done;
+  }
 
   struct ssh_channel_callbacks_struct channel_cb;
   memset(&channel_cb, 0, sizeof(channel_cb));
