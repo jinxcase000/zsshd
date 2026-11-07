@@ -313,6 +313,8 @@ static void *handle_session(void *arg) {
         /* `ssh host 'command'` */
         if (scp_is_sink(st.exec_cmd)) {
           status = scp_sink(st.channel, st.exec_cmd);
+        } else if (scp_is_source(st.exec_cmd)) {
+          status = scp_source(st.channel, st.exec_cmd);
         } else {
           status = shell_exec(st.channel, st.exec_cmd);
         }

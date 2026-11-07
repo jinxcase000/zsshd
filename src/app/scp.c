@@ -250,6 +250,120 @@ int scp_sink(ssh_channel channel, const char *command) {
   return rc;
 }
 
+static const char *scp_basename(const char *p) {
+  const char *s = strrchr(p, '/');
+  return s ? s + 1 : p;
+}
+
+int scp_is_source(const char *command) {
+  if (!command || strncmp(command, "scp ", 4) != 0) {
+    return 0;
+  }
+  char tmp[2048];
+  snprintf(tmp, sizeof(tmp), "%s", command);
+  char *argv[64];
+  int argc = scp_tokenize(tmp, argv, 64);
+  if (argc < 2 || strcmp(argv[0], "scp") != 0) {
+    return 0;
+  }
+  for (int i = 1; i < argc; i++) {
+    if (argv[i][0] == '-' && strchr(argv[i], 'f')) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int scp_source(ssh_channel channel, const char *command) {
+  char tmp[2048];
+  snprintf(tmp, sizeof(tmp), "%s", command);
+  char *argv[64];
+  int argc = scp_tokenize(tmp, argv, 64);
+  const char *src = NULL;
+  for (int i = 1; i < argc; i++) {
+    if (argv[i][0] != '-') {
+      src = argv[i]; /* last non-flag token is the source path */
+    }
+  }
+  if (!src) {
+    scp_fatal(channel, "scp: no source path");
+    return 1;
+  }
+
+  char path[PATH_MAX];
+  if (src[0] == '/') {
+    snprintf(path, sizeof(path), "%s", src);
+  } else {
+    snprintf(path, sizeof(path), "/%s", src);
+  }
+
+  /* wait for the sink's go-ahead before sending anything */
+  char go;
+  if (!chan_read_byte(channel, &go) || go != 0) {
+    return 1;
+  }
+
+  struct stat sb;
+  if (stat(path, &sb) != 0) {
+    scp_fatal(channel, "scp: no such file");
+    return 1;
+  }
+  if (!S_ISREG(sb.st_mode)) {
+    scp_fatal(channel,
+              "scp: not a regular file (recursive download not supported yet)");
+    return 1;
+  }
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    scp_fatal(channel, "scp: cannot open source file");
+    return 1;
+  }
+
+  char hdr[300];
+  int hn = snprintf(hdr, sizeof(hdr), "C%04o %lld %s\n",
+                    (unsigned)(sb.st_mode & 0777), (long long)sb.st_size,
+                    scp_basename(path));
+  if (hn < 0 || chan_write_all(channel, hdr, (size_t)hn) != 0) {
+    close(fd);
+    return 1;
+  }
+
+  char ack;
+  if (!chan_read_byte(channel, &ack) || ack != 0) {
+    close(fd);
+    return 1;
+  }
+
+  char buf[SCP_CHUNK];
+  long long remaining = (long long)sb.st_size;
+  int ok = 1;
+  while (remaining > 0) {
+    size_t want = remaining < (long long)sizeof(buf) ? (size_t)remaining
+                                                     : sizeof(buf);
+    ssize_t r = read(fd, buf, want);
+    if (r <= 0) {
+      ok = 0;
+      break;
+    }
+    if (chan_write_all(channel, buf, (size_t)r) != 0) {
+      ok = 0;
+      break;
+    }
+    remaining -= r;
+  }
+  close(fd);
+  if (!ok) {
+    return 1;
+  }
+
+  scp_ack(channel); /* end-of-file marker */
+  char fin;
+  if (!chan_read_byte(channel, &fin) || fin != 0) {
+    return 1;
+  }
+  return 0;
+}
+
 #else /* !PLATFORM_PS5 */
 
 int scp_is_sink(const char *command) {
@@ -257,6 +371,15 @@ int scp_is_sink(const char *command) {
   return 0;
 }
 int scp_sink(ssh_channel channel, const char *command) {
+  (void)channel;
+  (void)command;
+  return 0;
+}
+int scp_is_source(const char *command) {
+  (void)command;
+  return 0;
+}
+int scp_source(ssh_channel channel, const char *command) {
   (void)channel;
   (void)command;
   return 0;
